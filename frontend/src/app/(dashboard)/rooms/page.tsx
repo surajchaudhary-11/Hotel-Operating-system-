@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatCurrency } from "@/lib/utils";
 import {
   BedDouble, Plus, Filter, RefreshCw, Eye, Sparkles, Wrench,
-  CheckCircle, AlertTriangle, Layers, X
+  CheckCircle, AlertTriangle, Layers, X, Loader2
 } from "lucide-react";
 
 interface Room {
@@ -47,6 +47,8 @@ export default function RoomsPage() {
   const [selectedFloor, setSelectedFloor] = useState<string>("ALL");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Modal States
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
@@ -59,13 +61,18 @@ export default function RoomsPage() {
   const [newFloorId, setNewFloorId] = useState("");
   const [newRoomTypeId, setNewRoomTypeId] = useState("");
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (force = false) => {
+    if (force) {
+      invalidateApiCache("/rooms");
+      setRefreshing(true);
+    } else if (rooms.length === 0) {
+      setLoading(true);
+    }
     try {
       const [roomsData, floorsData, typesData] = await Promise.all([
-        apiFetch<Room[]>("/rooms"),
-        apiFetch<Floor[]>("/rooms/floors"),
-        apiFetch<RoomType[]>("/rooms/room-types"),
+        apiFetchCached<Room[]>("/rooms", {}, 20000),
+        apiFetchCached<Floor[]>("/rooms/floors", {}, 60000),
+        apiFetchCached<RoomType[]>("/rooms/room-types", {}, 60000),
       ]);
       setRooms(roomsData);
       setFloors(floorsData);
@@ -76,6 +83,7 @@ export default function RoomsPage() {
       console.error("Error loading rooms", e);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -84,15 +92,21 @@ export default function RoomsPage() {
   }, []);
 
   const handleStatusChange = async (roomId: string, newStatus: string) => {
+    // Optimistic UI update: reflect change instantly in 0ms
+    const previousRooms = rooms;
+    setRooms((prev) =>
+      prev.map((r) => (r.id === roomId ? { ...r, status: newStatus } : r))
+    );
+
     try {
       await apiFetch(`/rooms/${roomId}/status`, {
         method: "PATCH",
         body: JSON.stringify({ status: newStatus }),
       });
-      setRooms((prev) =>
-        prev.map((r) => (r.id === roomId ? { ...r, status: newStatus } : r))
-      );
+      invalidateApiCache("/rooms");
     } catch (err: any) {
+      // Revert on error
+      setRooms(previousRooms);
       alert("Failed to update status: " + err.message);
     }
   };
@@ -112,6 +126,8 @@ export default function RoomsPage() {
 
   const handleCreateRoom = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       await apiFetch("/rooms", {
         method: "POST",
@@ -123,9 +139,11 @@ export default function RoomsPage() {
       });
       setShowNewRoomModal(false);
       setNewRoomNumber("");
-      fetchData();
+      fetchData(true);
     } catch (err: any) {
       alert("Failed to create room: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -145,11 +163,12 @@ export default function RoomsPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchData}
-            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 transition shadow-sm"
+            onClick={() => fetchData(true)}
+            disabled={refreshing}
+            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 transition shadow-sm disabled:opacity-60"
             title="Refresh rooms"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={refreshing ? "animate-spin text-azure-600" : ""} />
           </button>
           <button
             onClick={() => setShowNewRoomModal(true)}
@@ -447,9 +466,11 @@ export default function RoomsPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold rounded-lg bg-azure-600 hover:bg-azure-700 text-white shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold rounded-lg bg-azure-600 hover:bg-azure-700 text-white shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Create Room
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Creating..." : "Create Room"}</span>
                 </button>
               </div>
             </form>

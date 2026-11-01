@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "@/context/auth-context";
-import { apiFetch } from "@/lib/api";
+import { apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatCurrency } from "@/lib/utils";
 import {
   BedDouble, TrendingUp, DollarSign, AlertCircle, Wrench,
@@ -20,16 +20,23 @@ export default function OverviewPage() {
   const [summary, setSummary] = useState<any>(null);
   const [report, setReport] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchDashboardData = async () => {
+  const fetchDashboardData = async (force = false) => {
     if (!activeHotel) return;
-    setLoading(true);
+    if (force) {
+      invalidateApiCache("/finance/summary");
+      invalidateApiCache("/reports/daily");
+      setRefreshing(true);
+    } else if (!summary) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const [sumData, repData] = await Promise.all([
-        apiFetch<any>("/finance/summary"),
-        apiFetch<any>("/reports/daily"),
+        apiFetchCached<any>("/finance/summary", {}, 30000),
+        apiFetchCached<any>("/reports/daily", {}, 30000),
       ]);
       setSummary(sumData);
       setReport(repData);
@@ -37,6 +44,7 @@ export default function OverviewPage() {
       setError(err.message || "Failed to load dashboard data");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -82,11 +90,12 @@ export default function OverviewPage() {
           <p className="text-xs text-slate-500">Live operational status, room inventory, and accrual P&L</p>
         </div>
         <button
-          onClick={fetchDashboardData}
-          className="self-start sm:self-auto flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 shadow-sm transition"
+          onClick={() => fetchDashboardData(true)}
+          disabled={refreshing}
+          className="self-start sm:self-auto flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 shadow-sm transition disabled:opacity-60"
         >
-          <RefreshCw size={13} />
-          <span>Refresh Live Data</span>
+          <RefreshCw size={13} className={refreshing ? "animate-spin text-azure-600" : ""} />
+          <span>{refreshing ? "Refreshing..." : "Refresh Live Data"}</span>
         </button>
       </div>
 

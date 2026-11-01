@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatDate, formatTime } from "@/lib/utils";
 import {
   Sparkles, Plus, CheckCircle, Clock, CheckSquare,
-  Square, ShieldCheck, XCircle, AlertCircle, RefreshCw
+  Square, ShieldCheck, XCircle, AlertCircle, RefreshCw, Loader2
 } from "lucide-react";
 
 interface HousekeepingTask {
@@ -30,6 +30,8 @@ export default function HousekeepingPage() {
   const [tasks, setTasks] = useState<HousekeepingTask[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Active checklist modal
   const [activeTask, setActiveTask] = useState<HousekeepingTask | null>(null);
@@ -40,12 +42,17 @@ export default function HousekeepingPage() {
   const [taskPriority, setTaskPriority] = useState("NORMAL");
   const [taskNotes, setTaskNotes] = useState("");
 
-  const fetchTasks = async () => {
-    setLoading(true);
+  const fetchTasks = async (force = false) => {
+    if (force) {
+      invalidateApiCache("/operations/housekeeping/tasks");
+      setRefreshing(true);
+    } else if (tasks.length === 0) {
+      setLoading(true);
+    }
     try {
       const [tasksData, roomsData] = await Promise.all([
-        apiFetch<HousekeepingTask[]>("/operations/housekeeping/tasks"),
-        apiFetch<Room[]>("/rooms"),
+        apiFetchCached<HousekeepingTask[]>("/operations/housekeeping/tasks", {}, 20000),
+        apiFetchCached<Room[]>("/rooms", {}, 60000),
       ]);
       setTasks(tasksData);
       setRooms(roomsData);
@@ -54,6 +61,7 @@ export default function HousekeepingPage() {
       console.error("Failed to load tasks", e);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -62,47 +70,84 @@ export default function HousekeepingPage() {
   }, []);
 
   const handleStartTask = async (taskId: string) => {
+    // Optimistic UI update: instant 0ms status change
+    const prevTasks = tasks;
+    setTasks((prev) =>
+      prev.map((t) => (t.id === taskId ? { ...t, status: "IN_PROGRESS" } : t))
+    );
+    if (activeTask && activeTask.id === taskId) {
+      setActiveTask((prev) => (prev ? { ...prev, status: "IN_PROGRESS" } : null));
+    }
+
     try {
       await apiFetch(`/operations/housekeeping/tasks/${taskId}/start`, { method: "PATCH" });
-      fetchTasks();
+      invalidateApiCache("/operations/housekeeping/tasks");
     } catch (err: any) {
+      setTasks(prevTasks);
       alert("Failed to start task: " + err.message);
     }
   };
 
   const handleToggleChecklist = async (taskId: string, itemKey: string, currentStatus: boolean) => {
+    // Optimistic UI update: instant checkbox toggle without re-rendering or fetching
+    const newStatus = !currentStatus;
+    setActiveTask((prev) => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        checklists: prev.checklists.map((c) =>
+          c.item_key === itemKey ? { ...c, is_completed: newStatus } : c
+        ),
+      };
+    });
+
+    setTasks((prev) =>
+      prev.map((t) => {
+        if (t.id !== taskId) return t;
+        return {
+          ...t,
+          checklists: t.checklists.map((c) =>
+            c.item_key === itemKey ? { ...c, is_completed: newStatus } : c
+          ),
+        };
+      })
+    );
+
     try {
       await apiFetch(`/operations/housekeeping/tasks/${taskId}/checklist`, {
         method: "PATCH",
-        body: JSON.stringify({ item_key: itemKey, is_completed: !currentStatus }),
+        body: JSON.stringify({ item_key: itemKey, is_completed: newStatus }),
       });
-      // Update local state
-      setActiveTask((prev) => {
-        if (!prev) return null;
-        return {
-          ...prev,
-          checklists: prev.checklists.map((c) =>
-            c.item_key === itemKey ? { ...c, is_completed: !currentStatus } : c
-          ),
-        };
-      });
-      fetchTasks();
+      invalidateApiCache("/operations/housekeeping/tasks");
     } catch (err: any) {
       alert("Failed to update checklist item: " + err.message);
+      fetchTasks(true);
     }
   };
 
   const handleCompleteTask = async (taskId: string) => {
+    // Optimistic UI update
+    setTasks((prev) =>
+      prev.map((t) => (t.id === taskId ? { ...t, status: "INSPECTION_PENDING" } : t))
+    );
+    setActiveTask(null);
+
     try {
       await apiFetch(`/operations/housekeeping/tasks/${taskId}/complete`, { method: "PATCH" });
-      setActiveTask(null);
-      fetchTasks();
+      invalidateApiCache("/operations/housekeeping/tasks");
     } catch (err: any) {
       alert("Failed to complete task: " + err.message);
+      fetchTasks(true);
     }
   };
 
   const handleInspection = async (taskId: string, roomId: string, pass: boolean) => {
+    // Optimistic UI update
+    const newStatus = pass ? "READY" : "INSPECTION_FAILED";
+    setTasks((prev) =>
+      prev.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t))
+    );
+
     try {
       await apiFetch("/operations/housekeeping/inspections", {
         method: "POST",
@@ -113,14 +158,18 @@ export default function HousekeepingPage() {
           rejection_reason: pass ? null : "Cleaning standards not met on bed linens or bathroom",
         }),
       });
-      fetchTasks();
+      invalidateApiCache("/operations/housekeeping/tasks");
+      invalidateApiCache("/rooms");
     } catch (err: any) {
       alert("Failed to submit inspection: " + err.message);
+      fetchTasks(true);
     }
   };
 
   const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       await apiFetch("/operations/housekeeping/tasks", {
         method: "POST",
@@ -132,9 +181,11 @@ export default function HousekeepingPage() {
       });
       setShowNewTaskModal(false);
       setTaskNotes("");
-      fetchTasks();
+      fetchTasks(true);
     } catch (err: any) {
       alert("Failed to create task: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -148,10 +199,12 @@ export default function HousekeepingPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchTasks}
-            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm"
+            onClick={() => fetchTasks(true)}
+            disabled={refreshing}
+            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm disabled:opacity-60"
+            title="Refresh tasks"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={refreshing ? "animate-spin text-azure-600" : ""} />
           </button>
           <button
             onClick={() => setShowNewTaskModal(true)}
@@ -383,9 +436,11 @@ export default function HousekeepingPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Assign Task
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Assigning..." : "Assign Task"}</span>
                 </button>
               </div>
             </form>

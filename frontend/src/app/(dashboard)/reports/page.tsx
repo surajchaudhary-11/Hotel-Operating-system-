@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   FileText, Download, Clock, Send, CheckCircle2,
@@ -12,6 +12,7 @@ export default function ReportsPage() {
   const [report, setReport] = useState<any>(null);
   const [settings, setSettings] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [triggering, setTriggering] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
@@ -21,12 +22,17 @@ export default function ReportsPage() {
   const [repTime, setRepTime] = useState("23:59");
   const [savingSettings, setSavingSettings] = useState(false);
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (force = false) => {
+    if (force) {
+      invalidateApiCache("/reports");
+      setRefreshing(true);
+    } else if (!report) {
+      setLoading(true);
+    }
     try {
       const [repData, settsData] = await Promise.all([
-        apiFetch<any>("/reports/daily"),
-        apiFetch<any>("/reports/settings"),
+        apiFetchCached<any>("/reports/daily", {}, 30000),
+        apiFetchCached<any>("/reports/settings", {}, 60000),
       ]);
       setReport(repData);
       setSettings(settsData);
@@ -43,6 +49,7 @@ export default function ReportsPage() {
       console.error("Error loading reports", e);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -54,6 +61,8 @@ export default function ReportsPage() {
     setTriggering(true);
     try {
       const res = await apiFetch<any>("/reports/trigger-audit", { method: "POST" });
+      invalidateApiCache("/reports");
+      invalidateApiCache("/finance");
       setReport(res.report);
       alert("Night Audit executed successfully!");
     } catch (err: any) {
@@ -115,10 +124,12 @@ export default function ReportsPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchData}
-            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm"
+            onClick={() => fetchData(true)}
+            disabled={refreshing}
+            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm disabled:opacity-60"
+            title="Refresh reports"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={refreshing ? "animate-spin text-azure-600" : ""} />
           </button>
           <button
             onClick={handleTriggerAudit}

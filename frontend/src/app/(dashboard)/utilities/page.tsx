@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   Zap, Plus, Droplets, RefreshCw, AlertCircle, Building2,
-  Calendar, CheckCircle2
+  Calendar, CheckCircle2, Loader2
 } from "lucide-react";
 
 interface UtilityMeter {
@@ -31,6 +31,8 @@ export default function UtilitiesPage() {
   const [meters, setMeters] = useState<UtilityMeter[]>([]);
   const [readings, setReadings] = useState<UtilityReading[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // New Reading Modal
   const [showReadingModal, setShowReadingModal] = useState(false);
@@ -39,12 +41,17 @@ export default function UtilitiesPage() {
   const [units, setUnits] = useState("");
   const [cost, setCost] = useState("");
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (force = false) => {
+    if (force) {
+      invalidateApiCache("/utilities");
+      setRefreshing(true);
+    } else if (meters.length === 0) {
+      setLoading(true);
+    }
     try {
       const [mData, rData] = await Promise.all([
-        apiFetch<UtilityMeter[]>("/utilities/meters"),
-        apiFetch<UtilityReading[]>("/utilities/readings"),
+        apiFetchCached<UtilityMeter[]>("/utilities/meters", {}, 60000),
+        apiFetchCached<UtilityReading[]>("/utilities/readings", {}, 20000),
       ]);
       setMeters(mData);
       setReadings(rData);
@@ -53,6 +60,7 @@ export default function UtilitiesPage() {
       console.error("Error loading utilities", e);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -62,6 +70,8 @@ export default function UtilitiesPage() {
 
   const handleRecordReading = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       await apiFetch("/utilities/readings", {
         method: "POST",
@@ -76,9 +86,11 @@ export default function UtilitiesPage() {
       setReadingVal("");
       setUnits("");
       setCost("");
-      fetchData();
+      fetchData(true);
     } catch (err: any) {
-      alert("Failed to log reading: " + err.message);
+      alert("Failed to record reading: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -92,10 +104,12 @@ export default function UtilitiesPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchData}
-            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm"
+            onClick={() => fetchData(true)}
+            disabled={refreshing}
+            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm disabled:opacity-60"
+            title="Refresh utility data"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={refreshing ? "animate-spin text-azure-600" : ""} />
           </button>
           <button
             onClick={() => setShowReadingModal(true)}
@@ -249,9 +263,11 @@ export default function UtilitiesPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Save Reading
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Saving..." : "Save Reading"}</span>
                 </button>
               </div>
             </form>

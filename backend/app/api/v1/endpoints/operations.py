@@ -33,14 +33,25 @@ async def list_housekeeping_tasks(
         .order_by(HousekeepingTask.created_at.desc())
     )
     res = await db.execute(stmt)
+    rows = res.all()
+    
+    # Batch fetch all checklists to prevent N+1 query overhead
+    task_ids = [t.id for t, _, _ in rows]
+    checklists_by_task: dict[str, list[dict]] = {tid: [] for tid in task_ids}
+    if task_ids:
+        c_stmt = (
+            select(CleaningChecklist)
+            .where(CleaningChecklist.task_id.in_(task_ids))
+            .order_by(CleaningChecklist.id)
+        )
+        c_res = await db.execute(c_stmt)
+        for c in c_res.scalars().all():
+            checklists_by_task.setdefault(c.task_id, []).append(
+                {"id": c.id, "item_key": c.item_key, "is_completed": c.is_completed}
+            )
+
     results = []
-    for task, room, user in res.all():
-        # Fetch checklists
-        c_res = await db.execute(select(CleaningChecklist).where(CleaningChecklist.task_id == task.id))
-        checklists = [
-            {"id": c.id, "item_key": c.item_key, "is_completed": c.is_completed}
-            for c in c_res.scalars().all()
-        ]
+    for task, room, user in rows:
         results.append(
             HousekeepingTaskResponse(
                 id=task.id,
@@ -55,7 +66,7 @@ async def list_housekeeping_tasks(
                 completed_at=task.completed_at,
                 notes=task.notes,
                 created_at=task.created_at,
-                checklists=checklists
+                checklists=checklists_by_task.get(task.id, [])
             )
         )
     return results
@@ -222,13 +233,25 @@ async def list_maintenance_tickets(
         .order_by(MaintenanceTicket.created_at.desc())
     )
     res = await db.execute(stmt)
+    rows = res.all()
+
+    # Batch fetch all updates to eliminate N+1 queries
+    ticket_ids = [t.id for t, _, _, _ in rows]
+    updates_by_ticket: dict[str, list[dict]] = {tid: [] for tid in ticket_ids}
+    if ticket_ids:
+        u_stmt = (
+            select(MaintenanceUpdate)
+            .where(MaintenanceUpdate.ticket_id.in_(ticket_ids))
+            .order_by(MaintenanceUpdate.created_at)
+        )
+        u_res = await db.execute(u_stmt)
+        for up in u_res.scalars().all():
+            updates_by_ticket.setdefault(up.ticket_id, []).append(
+                {"id": up.id, "message": up.message, "status_change": up.status_change, "cost": float(up.additional_cost), "created_at": up.created_at}
+            )
+
     results = []
-    for t, r, a, u in res.all():
-        u_res = await db.execute(select(MaintenanceUpdate).where(MaintenanceUpdate.ticket_id == t.id).order_by(MaintenanceUpdate.created_at))
-        updates = [
-            {"id": up.id, "message": up.message, "status_change": up.status_change, "cost": float(up.additional_cost), "created_at": up.created_at}
-            for up in u_res.scalars().all()
-        ]
+    for t, r, a, u in rows:
         results.append(
             MaintenanceTicketResponse(
                 id=t.id,
@@ -248,7 +271,7 @@ async def list_maintenance_tickets(
                 actual_cost=t.actual_cost,
                 resolved_at=t.resolved_at,
                 created_at=t.created_at,
-                updates=updates
+                updates=updates_by_ticket.get(t.id, [])
             )
         )
     return results

@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatCurrency, formatDate, formatTime } from "@/lib/utils";
 import {
   Users, Plus, Share2, LogOut, CheckCircle, RefreshCw,
-  Copy, Check, UserCheck, ShieldCheck, X
+  Copy, Check, UserCheck, ShieldCheck, X, Loader2
 } from "lucide-react";
 
 interface Stay {
@@ -39,6 +39,8 @@ export default function GuestsPage() {
   const [stays, setStays] = useState<Stay[]>([]);
   const [availableRooms, setAvailableRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
 
   // Check-In Modal
@@ -58,12 +60,17 @@ export default function GuestsPage() {
   const [settlementAmount, setSettlementAmount] = useState("");
   const [settlementMode, setSettlementMode] = useState("UPI_QR");
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (force = false) => {
+    if (force) {
+      invalidateApiCache("/guests");
+      setRefreshing(true);
+    } else if (stays.length === 0) {
+      setLoading(true);
+    }
     try {
       const [staysData, roomsData] = await Promise.all([
-        apiFetch<Stay[]>("/guests/stays"),
-        apiFetch<Room[]>("/rooms"),
+        apiFetchCached<Stay[]>("/guests/stays", {}, 20000),
+        apiFetchCached<Room[]>("/rooms", {}, 60000),
       ]);
       setStays(staysData);
       const vacant = roomsData.filter((r) => r.status === "VACANT_CLEAN" || r.status === "VACANT_DIRTY");
@@ -78,6 +85,7 @@ export default function GuestsPage() {
       console.error("Error fetching guest stays", e);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -95,6 +103,8 @@ export default function GuestsPage() {
 
   const handleCheckIn = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     const selRoom = availableRooms.find((r) => r.id === gRoomId);
     const rate = selRoom ? selRoom.base_price : 3500;
 
@@ -120,15 +130,18 @@ export default function GuestsPage() {
       setGName("");
       setGPhone("+91 ");
       setGAdvanceAmount("");
-      fetchData();
+      fetchData(true);
     } catch (err: any) {
       alert("Check-in failed: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const handleCheckoutSettle = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!checkoutStay) return;
+    if (!checkoutStay || isSubmitting) return;
+    setIsSubmitting(true);
 
     try {
       await apiFetch(`/guests/stays/${checkoutStay.id}/checkout`, {
@@ -140,9 +153,11 @@ export default function GuestsPage() {
       });
       setCheckoutStay(null);
       setSettlementAmount("");
-      fetchData();
+      fetchData(true);
     } catch (err: any) {
       alert("Checkout failed: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -156,10 +171,12 @@ export default function GuestsPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchData}
-            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm"
+            onClick={() => fetchData(true)}
+            disabled={refreshing}
+            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm disabled:opacity-60"
+            title="Refresh stays"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={refreshing ? "animate-spin text-azure-600" : ""} />
           </button>
           <button
             onClick={() => setShowCheckInModal(true)}
@@ -392,9 +409,11 @@ export default function GuestsPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Confirm Check-In
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Checking In..." : "Confirm Check-In"}</span>
                 </button>
               </div>
             </form>
@@ -465,9 +484,11 @@ export default function GuestsPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Complete Settlement & Check-Out
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Settling..." : "Complete Settlement & Check-Out"}</span>
                 </button>
               </div>
             </form>

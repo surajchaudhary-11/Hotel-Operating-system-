@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   TrendingUp, Plus, DollarSign, Calculator, RefreshCw,
-  FileText, CheckCircle2, AlertCircle, ArrowUpRight, HelpCircle
+  FileText, CheckCircle2, AlertCircle, ArrowUpRight, HelpCircle, Loader2
 } from "lucide-react";
 
 interface Expense {
@@ -51,6 +51,8 @@ export default function FinancePage() {
   const [profitability, setProfitability] = useState<RoomProfitabilityItem[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Record Expense Modal
   const [showExpenseModal, setShowExpenseModal] = useState(false);
@@ -67,15 +69,20 @@ export default function FinancePage() {
   const [simUtility, setSimUtility] = useState("4000");
   const [simulationResult, setSimulationResult] = useState<any>(null);
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (force = false) => {
+    if (force) {
+      invalidateApiCache("/finance");
+      setRefreshing(true);
+    } else if (!summary) {
+      setLoading(true);
+    }
     try {
       const [sumData, expData, catData, profData, roomsData] = await Promise.all([
-        apiFetch<any>("/finance/summary"),
-        apiFetch<Expense[]>("/finance/expenses"),
-        apiFetch<ExpenseCategory[]>("/finance/categories"),
-        apiFetch<RoomProfitabilityItem[]>("/finance/room-profitability"),
-        apiFetch<Room[]>("/rooms"),
+        apiFetchCached<any>("/finance/summary", {}, 30000),
+        apiFetchCached<Expense[]>("/finance/expenses", {}, 20000),
+        apiFetchCached<ExpenseCategory[]>("/finance/categories", {}, 60000),
+        apiFetchCached<RoomProfitabilityItem[]>("/finance/room-profitability", {}, 30000),
+        apiFetchCached<Room[]>("/rooms", {}, 60000),
       ]);
       setSummary(sumData);
       setExpenses(expData);
@@ -87,6 +94,7 @@ export default function FinancePage() {
       console.error("Error loading finance data", e);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -94,9 +102,9 @@ export default function FinancePage() {
     fetchData();
   }, []);
 
-  // Run scenario simulation
+  // Run scenario simulation with 350ms debounce
   useEffect(() => {
-    const runSimulation = async () => {
+    const timer = setTimeout(async () => {
       try {
         const res = await apiFetch<any>("/finance/scenario-simulation", {
           method: "POST",
@@ -112,12 +120,15 @@ export default function FinancePage() {
       } catch (e) {
         console.error(e);
       }
-    };
-    runSimulation();
+    }, 350);
+
+    return () => clearTimeout(timer);
   }, [simPrice, simOccupancy, simMaintenance, simUtility]);
 
   const handleCreateExpense = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       await apiFetch("/finance/expenses", {
         method: "POST",
@@ -132,9 +143,11 @@ export default function FinancePage() {
       setShowExpenseModal(false);
       setExpAmount("");
       setExpDesc("");
-      fetchData();
+      fetchData(true);
     } catch (err: any) {
-      alert("Failed to log expense: " + err.message);
+      alert("Failed to record expense: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -148,10 +161,12 @@ export default function FinancePage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchData}
-            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm"
+            onClick={() => fetchData(true)}
+            disabled={refreshing}
+            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm disabled:opacity-60"
+            title="Refresh finance data"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={refreshing ? "animate-spin text-azure-600" : ""} />
           </button>
           <button
             onClick={() => setShowExpenseModal(true)}
@@ -400,9 +415,11 @@ export default function FinancePage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Save Expense
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Saving..." : "Save Expense"}</span>
                 </button>
               </div>
             </form>

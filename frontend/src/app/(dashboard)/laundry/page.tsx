@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   Shirt, Plus, ArrowRight, Truck, RefreshCw, CheckCircle2,
-  Building2, Phone, X
+  Building2, Phone, X, Loader2
 } from "lucide-react";
 
 interface LaundryVendor {
@@ -27,6 +27,8 @@ export default function LaundryPage() {
   const [vendors, setVendors] = useState<LaundryVendor[]>([]);
   const [linenCategories, setLinenCategories] = useState<AssetCategory[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Dispatch modal
   const [showDispatchModal, setShowDispatchModal] = useState(false);
@@ -40,12 +42,17 @@ export default function LaundryPage() {
   const [vPhone, setVPhone] = useState("");
   const [vRateKg, setVRateKg] = useState("45");
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (force = false) => {
+    if (force) {
+      invalidateApiCache("/operations/laundry");
+      setRefreshing(true);
+    } else if (vendors.length === 0) {
+      setLoading(true);
+    }
     try {
       const [vData, cData] = await Promise.all([
-        apiFetch<LaundryVendor[]>("/operations/laundry/vendors"),
-        apiFetch<AssetCategory[]>("/inventory/categories"),
+        apiFetchCached<LaundryVendor[]>("/operations/laundry/vendors", {}, 60000),
+        apiFetchCached<AssetCategory[]>("/inventory/categories", {}, 60000),
       ]);
       setVendors(vData);
       const linens = cData.filter((c) => c.is_linen);
@@ -58,6 +65,7 @@ export default function LaundryPage() {
       console.error("Error fetching laundry data", e);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -67,6 +75,8 @@ export default function LaundryPage() {
 
   const handleDispatchBatch = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       await apiFetch("/operations/laundry/batches/dispatch", {
         method: "POST",
@@ -77,20 +87,24 @@ export default function LaundryPage() {
       });
       setShowDispatchModal(false);
       alert("Laundry batch dispatched successfully! Inventory movement ledger updated.");
-      fetchData();
+      fetchData(true);
     } catch (err: any) {
       alert("Failed to dispatch batch: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const handleCreateVendor = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       await apiFetch("/operations/laundry/vendors", {
         method: "POST",
         body: JSON.stringify({
           name: vName,
-          contact_person: vContact,
+          contact_person: vContact || null,
           phone: vPhone,
           rate_per_kg: parseFloat(vRateKg) || null,
         }),
@@ -99,9 +113,11 @@ export default function LaundryPage() {
       setVName("");
       setVContact("");
       setVPhone("");
-      fetchData();
+      fetchData(true);
     } catch (err: any) {
       alert("Failed to register vendor: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -115,10 +131,12 @@ export default function LaundryPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchData}
-            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm"
+            onClick={() => fetchData(true)}
+            disabled={refreshing}
+            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm disabled:opacity-60"
+            title="Refresh laundry data"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={refreshing ? "animate-spin text-azure-600" : ""} />
           </button>
           <button
             onClick={() => setShowAddVendor(true)}
@@ -255,9 +273,11 @@ export default function LaundryPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Confirm Dispatch
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Dispatching..." : "Confirm Dispatch"}</span>
                 </button>
               </div>
             </form>
@@ -327,9 +347,11 @@ export default function LaundryPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Save Vendor
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Saving..." : "Save Vendor"}</span>
                 </button>
               </div>
             </form>

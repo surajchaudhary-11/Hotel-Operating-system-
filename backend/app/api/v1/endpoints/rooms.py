@@ -17,42 +17,36 @@ async def list_rooms(
     db: AsyncSession = Depends(get_db)
 ):
     stmt = (
-        select(Room, Floor, RoomType)
+        select(Room, Floor, RoomType, Guest.full_name)
         .join(Floor, Room.floor_id == Floor.id)
         .join(RoomType, Room.room_type_id == RoomType.id)
+        .outerjoin(
+            GuestStay,
+            (GuestStay.room_id == Room.id) & (GuestStay.status == "CHECKED_IN") & (GuestStay.hotel_id == ctx.hotel_id)
+        )
+        .outerjoin(Guest, GuestStay.guest_id == Guest.id)
         .where(Room.hotel_id == ctx.hotel_id, Room.is_active == True)
         .order_by(Floor.floor_number, Room.room_number)
     )
     res = await db.execute(stmt)
     rows = res.all()
     
-    results = []
-    for room, floor, room_type in rows:
-        # Check active guest stay
-        stmt_stay = (
-            select(GuestStay, Guest)
-            .join(Guest, GuestStay.guest_id == Guest.id)
-            .where(GuestStay.room_id == room.id, GuestStay.status == "CHECKED_IN")
+    results = [
+        RoomResponse(
+            id=room.id,
+            hotel_id=room.hotel_id,
+            floor_id=room.floor_id,
+            room_type_id=room.room_type_id,
+            room_number=room.room_number,
+            status=room.status,
+            is_active=room.is_active,
+            floor_name=floor.name,
+            room_type_name=room_type.name,
+            base_price=room_type.base_price,
+            current_guest_name=guest_name
         )
-        res_stay = await db.execute(stmt_stay)
-        stay_row = res_stay.first()
-        guest_name = stay_row[1].full_name if stay_row else None
-
-        results.append(
-            RoomResponse(
-                id=room.id,
-                hotel_id=room.hotel_id,
-                floor_id=room.floor_id,
-                room_type_id=room.room_type_id,
-                room_number=room.room_number,
-                status=room.status,
-                is_active=room.is_active,
-                floor_name=floor.name,
-                room_type_name=room_type.name,
-                base_price=room_type.base_price,
-                current_guest_name=guest_name
-            )
-        )
+        for room, floor, room_type, guest_name in rows
+    ]
     return results
 
 @router.post("", response_model=RoomResponse)

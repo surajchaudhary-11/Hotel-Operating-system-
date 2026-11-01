@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   Boxes, Plus, QrCode, ArrowRightLeft, AlertTriangle,
-  RefreshCw, CheckCircle2, History, X, ShieldAlert
+  RefreshCw, CheckCircle2, History, X, ShieldAlert, Loader2
 } from "lucide-react";
 
 interface Asset {
@@ -48,6 +48,8 @@ export default function InventoryPage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [activeTab, setActiveTab] = useState<"ASSETS" | "LEDGER">("ASSETS");
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // QR Modal
   const [selectedQR, setSelectedQR] = useState<{ code: string; name: string } | null>(null);
@@ -65,13 +67,18 @@ export default function InventoryPage() {
   const [newTag, setNewTag] = useState("");
   const [newPrice, setNewPrice] = useState("");
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (force = false) => {
+    if (force) {
+      invalidateApiCache("/inventory");
+      setRefreshing(true);
+    } else if (assets.length === 0) {
+      setLoading(true);
+    }
     try {
       const [assetsData, catsData, txsData] = await Promise.all([
-        apiFetch<Asset[]>("/inventory/assets"),
-        apiFetch<AssetCategory[]>("/inventory/categories"),
-        apiFetch<Transaction[]>("/inventory/transactions"),
+        apiFetchCached<Asset[]>("/inventory/assets", {}, 20000),
+        apiFetchCached<AssetCategory[]>("/inventory/categories", {}, 60000),
+        apiFetchCached<Transaction[]>("/inventory/transactions", {}, 20000),
       ]);
       setAssets(assetsData);
       setCategories(catsData);
@@ -81,6 +88,7 @@ export default function InventoryPage() {
       console.error("Error loading inventory", e);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -90,7 +98,8 @@ export default function InventoryPage() {
 
   const handleRecordMovement = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!transferAsset) return;
+    if (!transferAsset || isSubmitting) return;
+    setIsSubmitting(true);
 
     try {
       await apiFetch("/inventory/transactions", {
@@ -107,14 +116,18 @@ export default function InventoryPage() {
       });
       setTransferAsset(null);
       setTransferNotes("");
-      fetchData();
+      fetchData(true);
     } catch (err: any) {
       alert("Failed to record movement: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const handleCreateAsset = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       await apiFetch("/inventory/assets", {
         method: "POST",
@@ -131,9 +144,11 @@ export default function InventoryPage() {
       setNewName("");
       setNewTag("");
       setNewPrice("");
-      fetchData();
+      fetchData(true);
     } catch (err: any) {
-      alert("Failed to add asset: " + err.message);
+      alert("Failed to register asset: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -147,10 +162,12 @@ export default function InventoryPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchData}
-            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 transition shadow-sm"
+            onClick={() => fetchData(true)}
+            disabled={refreshing}
+            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 transition shadow-sm disabled:opacity-60"
+            title="Refresh inventory"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={refreshing ? "animate-spin text-azure-600" : ""} />
           </button>
           <button
             onClick={() => setShowAddAsset(true)}
@@ -404,9 +421,11 @@ export default function InventoryPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Log Transaction
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Logging..." : "Log Transaction"}</span>
                 </button>
               </div>
             </form>
@@ -478,9 +497,11 @@ export default function InventoryPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Register
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Registering..." : "Register"}</span>
                 </button>
               </div>
             </form>

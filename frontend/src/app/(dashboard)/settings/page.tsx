@@ -2,10 +2,10 @@
 
 import React, { useEffect, useState } from "react";
 import { useAuth } from "@/context/auth-context";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import {
   Settings, Building2, Users, ShieldCheck, Clock,
-  Save, Plus, RefreshCw, CheckCircle2, UserCheck
+  Save, Plus, RefreshCw, CheckCircle2, UserCheck, Loader2
 } from "lucide-react";
 
 interface Member {
@@ -23,6 +23,8 @@ export default function SettingsPage() {
   const [hotel, setHotel] = useState<any>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Profile Form
   const [name, setName] = useState("");
@@ -37,13 +39,14 @@ export default function SettingsPage() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("RECEPTIONIST");
 
-  const fetchData = async () => {
+  const fetchData = async (isBackground = false) => {
     if (!activeHotel) return;
-    setLoading(true);
+    if (isBackground) setRefreshing(true);
+    else setLoading(true);
     try {
       const [hData, mData] = await Promise.all([
-        apiFetch<any>(`/hotels/${activeHotel.hotel_id}`),
-        apiFetch<Member[]>(`/hotels/${activeHotel.hotel_id}/members`),
+        apiFetchCached<any>(`/hotels/${activeHotel.hotel_id}`, 60000),
+        apiFetchCached<Member[]>(`/hotels/${activeHotel.hotel_id}/members`, 60000),
       ]);
       setHotel(hData);
       setMembers(mData);
@@ -56,6 +59,7 @@ export default function SettingsPage() {
       console.error("Error loading settings", e);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -65,7 +69,7 @@ export default function SettingsPage() {
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeHotel) return;
+    if (!activeHotel || savingProfile) return;
     setSavingProfile(true);
     try {
       await apiFetch(`/hotels/${activeHotel.hotel_id}`, {
@@ -78,6 +82,7 @@ export default function SettingsPage() {
           check_out_time: checkOutTime,
         }),
       });
+      invalidateApiCache(`/hotels/${activeHotel.hotel_id}`);
       await refreshUserData();
       alert("Property settings saved successfully!");
     } catch (err: any) {
@@ -89,7 +94,8 @@ export default function SettingsPage() {
 
   const handleAddMember = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeHotel) return;
+    if (!activeHotel || isSubmitting) return;
+    setIsSubmitting(true);
     try {
       await apiFetch(`/hotels/${activeHotel.hotel_id}/members`, {
         method: "POST",
@@ -100,10 +106,13 @@ export default function SettingsPage() {
       });
       setShowAddMember(false);
       setInviteEmail("");
-      fetchData();
+      invalidateApiCache(`/hotels/${activeHotel.hotel_id}/members`);
+      fetchData(true);
       alert(`User granted ${inviteRole} role in this property!`);
     } catch (err: any) {
       alert("Failed to add member: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -329,9 +338,17 @@ export default function SettingsPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 disabled:opacity-60 text-white rounded-lg shadow-sm flex items-center gap-1.5"
                 >
-                  Add Member
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 size={13} className="animate-spin" />
+                      <span>Adding...</span>
+                    </>
+                  ) : (
+                    "Add Member"
+                  )}
                 </button>
               </div>
             </form>

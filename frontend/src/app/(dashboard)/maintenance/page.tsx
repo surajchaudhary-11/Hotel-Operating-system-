@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   Wrench, Plus, CheckCircle, Clock, AlertTriangle,
-  RefreshCw, MessageSquare, DollarSign, X
+  RefreshCw, MessageSquare, DollarSign, X, Loader2
 } from "lucide-react";
 
 interface Ticket {
@@ -40,6 +40,8 @@ export default function MaintenancePage() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // New Ticket Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -56,13 +58,18 @@ export default function MaintenancePage() {
   const [updateStatus, setUpdateStatus] = useState("IN_PROGRESS");
   const [updateCost, setUpdateCost] = useState("");
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (force = false) => {
+    if (force) {
+      invalidateApiCache("/operations/maintenance/tickets");
+      setRefreshing(true);
+    } else if (tickets.length === 0) {
+      setLoading(true);
+    }
     try {
       const [ticketsData, roomsData, assetsData] = await Promise.all([
-        apiFetch<Ticket[]>("/operations/maintenance/tickets"),
-        apiFetch<Room[]>("/rooms"),
-        apiFetch<Asset[]>("/inventory/assets"),
+        apiFetchCached<Ticket[]>("/operations/maintenance/tickets", {}, 20000),
+        apiFetchCached<Room[]>("/rooms", {}, 60000),
+        apiFetchCached<Asset[]>("/inventory/assets", {}, 60000),
       ]);
       setTickets(ticketsData);
       setRooms(roomsData);
@@ -71,6 +78,7 @@ export default function MaintenancePage() {
       console.error("Error fetching maintenance data", e);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -80,6 +88,8 @@ export default function MaintenancePage() {
 
   const handleCreateTicket = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       await apiFetch("/operations/maintenance/tickets", {
         method: "POST",
@@ -96,15 +106,18 @@ export default function MaintenancePage() {
       setNewTitle("");
       setNewDesc("");
       setNewEstCost("");
-      fetchData();
+      fetchData(true);
     } catch (err: any) {
       alert("Failed to create ticket: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const handleAddUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedTicket) return;
+    if (!selectedTicket || isSubmitting) return;
+    setIsSubmitting(true);
 
     try {
       await apiFetch(`/operations/maintenance/tickets/${selectedTicket.id}/updates`, {
@@ -118,9 +131,11 @@ export default function MaintenancePage() {
       setSelectedTicket(null);
       setUpdateMsg("");
       setUpdateCost("");
-      fetchData();
+      fetchData(true);
     } catch (err: any) {
       alert("Failed to log update: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -134,10 +149,12 @@ export default function MaintenancePage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchData}
-            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm"
+            onClick={() => fetchData(true)}
+            disabled={refreshing}
+            className="p-2 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 shadow-sm disabled:opacity-60"
+            title="Refresh tickets"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={refreshing ? "animate-spin text-azure-600" : ""} />
           </button>
           <button
             onClick={() => setShowCreateModal(true)}
@@ -276,9 +293,11 @@ export default function MaintenancePage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Save Update
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Saving..." : "Save Update"}</span>
                 </button>
               </div>
             </form>
@@ -367,9 +386,11 @@ export default function MaintenancePage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-semibold bg-azure-600 hover:bg-azure-700 text-white rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  Submit Ticket
+                  {isSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  <span>{isSubmitting ? "Submitting..." : "Submit Ticket"}</span>
                 </button>
               </div>
             </form>

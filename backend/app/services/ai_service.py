@@ -861,7 +861,7 @@ class AIHotelAssistantService:
                     f"1. You MUST call available backend operational tools to retrieve live facts. Never guess or hallucinate hotel data.\n"
                     f"2. USALI Rule: Room revenue is earned on an accrual basis. Do NOT label operating contribution as Net Profit.\n"
                     f"3. Redact sensitive guest phone and card numbers.\n"
-                    f"4. If proposing a consequential action (cleaning task, maintenance ticket), explain what you are proposing and ask for confirmation.\n"
+                    f"4. When the user asks to create, log, or assign tasks or tickets (cleaning task, maintenance ticket), YOU MUST CALL the action tool (create_housekeeping_task, create_maintenance_ticket). The backend intercepts the call to generate a structured confirmation proposal.\n"
                     f"5. Answer in professional English or Hindi depending on the language of the user."
                 )
             }]
@@ -955,6 +955,36 @@ class AIHotelAssistantService:
                         if cand2:
                             synth_parts = cand2[0].get("content", {}).get("parts", [])
                             synth_text = "\n".join(p["text"] for p in synth_parts if "text" in p)
+
+                            if not action_proposal:
+                                q_low = query.lower()
+                                room_m = re.search(r'(?:room|कमरा|no\.?|नंबर)?\s*(\d{3,4})', q_low)
+                                room_no = room_m.group(1) if room_m else None
+                                if room_no and any(w in q_low for w in ["clean", "housekeep", "sweep", "mop", "सफाई"]) and any(w in q_low for w in ["create", "task", "बनाओ", "शुरू"]):
+                                    action_id = f"act_{uuid.uuid4().hex[:10]}"
+                                    action_proposal = ActionProposal(
+                                        action_id=action_id,
+                                        action_name="create_housekeeping_task",
+                                        title="Create Housekeeping Task",
+                                        parameters={"room_number": room_no, "priority": "MEDIUM", "notes": query},
+                                        impact_summary=f"Proposes housekeeping task for Room {room_no}",
+                                        status="pending_confirmation"
+                                    )
+                                    if "create_housekeeping_task" not in tools_executed:
+                                        tools_executed.append("create_housekeeping_task")
+                                elif room_no and any(w in q_low for w in ["repair", "fix", "broken", "leak", "खराब", "मरम्मत"]) and any(w in q_low for w in ["create", "log", "ticket", "बनाओ", "report"]):
+                                    action_id = f"act_{uuid.uuid4().hex[:10]}"
+                                    action_proposal = ActionProposal(
+                                        action_id=action_id,
+                                        action_name="create_maintenance_ticket",
+                                        title="Create Maintenance Ticket",
+                                        parameters={"room_number": room_no, "title": "Maintenance Defect", "description": query, "priority": "MEDIUM"},
+                                        impact_summary=f"Proposes maintenance ticket for Room {room_no}",
+                                        status="pending_confirmation"
+                                    )
+                                    if "create_maintenance_ticket" not in tools_executed:
+                                        tools_executed.append("create_maintenance_ticket")
+
                             return synth_text, tools_executed, action_proposal
 
             except Exception as e:
