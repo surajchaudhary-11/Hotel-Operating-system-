@@ -26,16 +26,16 @@ The complete engineering, operational, and architectural specifications are orga
 
 | Document | Description | Key Topics Covered |
 |---|---|---|
-| [**Product Requirements**](file:///c:/Users/lap/Desktop/hotel/docs/PRODUCT_REQUIREMENTS.md) | Exhaustive PRD across all 15 modules | User personas, functional requirements, inputs/outputs, Indian market edge cases |
-| [**System Architecture**](file:///c:/Users/lap/Desktop/hotel/docs/SYSTEM_ARCHITECTURE.md) | Full-stack topology & data flows | Next.js App Router, FastAPI ASGI, RLS policies, background scheduler |
-| [**Database Design**](file:///c:/Users/lap/Desktop/hotel/docs/DATABASE_DESIGN.md) | Complete PostgreSQL schema & ERD | 32 tables, foreign keys, check constraints, indexes, missing entity roadmap |
-| [**API Specification**](file:///c:/Users/lap/Desktop/hotel/docs/API_SPECIFICATION.md) | REST API catalog (OpenAPI aligned) | Endpoints, headers (`X-Hotel-ID`), request/response JSON schemas, error codes |
-| [**Permission Matrix**](file:///c:/Users/lap/Desktop/hotel/docs/PERMISSION_MATRIX.md) | Granular multi-tenant RBAC | 7 roles (`OWNER` to `ADMIN`), CRUD permissions, field-level PII redaction |
-| [**Business Rules**](file:///c:/Users/lap/Desktop/hotel/docs/BUSINESS_RULES.md) | Accounting formulas & state machines | USALI Operating Contribution, room states, double-entry inventory, night audit |
-| [**Security Specification**](file:///c:/Users/lap/Desktop/hotel/docs/SECURITY_SPECIFICATION.md) | Security & compliance architecture | Tenant isolation, Indian DPDP Act 2023 Aadhaar masking, signed S3 URLs |
-| [**Testing Strategy**](file:///c:/Users/lap/Desktop/hotel/docs/TESTING_STRATEGY.md) | QA blueprint & automated test suites | 10 critical business test cases, concurrency, race conditions, pytest/coverage |
-| [**Deployment Guide**](file:///c:/Users/lap/Desktop/hotel/docs/DEPLOYMENT_GUIDE.md) | Zero-Docker production guide | Vercel (Frontend), Render (Backend), Supabase (Database), env vars matrix |
-| [**Phase 0 Architecture**](file:///c:/Users/lap/Desktop/hotel/docs/PHASE_0_ARCHITECTURE.md) | Original approved architectural blueprint | Foundational architectural decisions and architectural design rationale |
+| [**Product Requirements**](docs/PRODUCT_REQUIREMENTS.md) | Exhaustive PRD across all 15 modules | User personas, functional requirements, inputs/outputs, Indian market edge cases |
+| [**System Architecture**](docs/SYSTEM_ARCHITECTURE.md) | Full-stack topology & data flows | Next.js App Router, FastAPI ASGI, tenant context isolation, background scheduler |
+| [**Database Design**](docs/DATABASE_DESIGN.md) | Complete PostgreSQL schema & ERD | 32 tables, foreign keys, check constraints, indexes, missing entity roadmap |
+| [**API Specification**](docs/API_SPECIFICATION.md) | REST API catalog (OpenAPI aligned) | Endpoints, headers (`X-Hotel-ID`), request/response JSON schemas, error codes |
+| [**Permission Matrix**](docs/PERMISSION_MATRIX.md) | Granular multi-tenant RBAC | 7 roles (`OWNER` to `ADMIN`), CRUD permissions, field-level PII redaction |
+| [**Business Rules**](docs/BUSINESS_RULES.md) | Accounting formulas & state machines | USALI Operating Contribution, room states, double-entry inventory, night audit |
+| [**Security Specification**](docs/SECURITY_SPECIFICATION.md) | Security & compliance architecture | Tenant isolation, Indian DPDP Act 2023 Aadhaar masking, signed S3 URLs |
+| [**Testing Strategy**](docs/TESTING_STRATEGY.md) | QA blueprint & automated test suites | 10 critical business test cases, concurrency, race conditions, pytest/coverage |
+| [**Deployment Guide**](docs/DEPLOYMENT_GUIDE.md) | Zero-Docker production guide | Vercel (Frontend), Render (Backend), Supabase (Database), env vars matrix |
+| [**Phase 0 Architecture**](docs/PHASE_0_ARCHITECTURE.md) | Original approved architectural blueprint | Foundational architectural decisions and architectural design rationale |
 
 ---
 
@@ -62,67 +62,64 @@ The complete engineering, operational, and architectural specifications are orga
 - **Backend API Hosting:** Render Web Service (FastAPI ASGI with Uvicorn workers)
 - **Relational Database:** Supabase Cloud PostgreSQL 15+ (AWS Mumbai `ap-south-1`) with PgBouncer pooler (port 6543)
 - **Document & File Storage:** Supabase Storage (Private S3-compatible bucket with 15-minute signed URLs)
-- **Identity & Authentication:** Supabase Auth (JWT RS256/HS256)
+- **Identity & Authentication:** Fast JWT Token Authentication (HS256) with Bcrypt Hashed Passwords
 
 ---
 
 ## 4. Local Development Quick-Start
 
 ### 4.1 Backend Setup
-1. **Navigate to the `backend` directory:**
-   ```powershell
-   cd backend
-   ```
-2. **Activate the Python virtual environment:**
-   ```powershell
-   .\venv\Scripts\Activate.ps1
-   ```
-3. **Install dependencies:**
-   ```powershell
-   pip install -r requirements.txt
-   ```
-4. **Apply database migrations:**
-   ```powershell
-   alembic upgrade head
-   ```
-5. **Start the FastAPI server:**
-   ```powershell
-   uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-   ```
-   - Interactive Swagger API Documentation: [http://127.0.0.1:8000/api/v1/docs](http://127.0.0.1:8000/api/v1/docs)
-   - Health check: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+
+**Windows (PowerShell):**
+```powershell
+cd backend
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+alembic upgrade head
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+**macOS / Linux (Bash):**
+```bash
+cd backend
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+alembic upgrade head
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+- Interactive Swagger API Documentation: [http://127.0.0.1:8000/api/v1/docs](http://127.0.0.1:8000/api/v1/docs)
+- Health check: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 
 ### 4.2 Frontend Setup
-1. **Navigate to the `frontend` directory:**
-   ```powershell
-   cd frontend
-   ```
-2. **Install npm dependencies:**
-   ```powershell
-   npm install
-   ```
-3. **Launch Next.js development server:**
-   ```powershell
-   npm run dev
-   ```
-4. Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+**Windows & macOS / Linux:**
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
 
-## 5. Seed Credentials for Local Verification
+## 5. Development Demo Credentials
 
-The local database automatically seeds a real Varanasi hotel (*Kashi Heritage Haveli*) with active operational data:
+> **Security Notice**: Demo credentials and automatic seeding are active **only** in local development (`ENVIRONMENT="development"`). In production, demo seeding is strictly disabled (`ENABLE_DEMO_SEEDING="false"`).
 
-| Field | Demo Credential |
+In local development, the database automatically seeds a demo Varanasi hotel (*Kashi Heritage Haveli*) with active operational data:
+
+| Field | Local Demo Credential |
 |---|---|
 | **Email** | `owner@kashiheritage.com` |
-| **Password** | `HotelOS2026!` |
+| **Password** | `HotelOS2026!` *(Change immediately in live staging)* |
 | **Role** | `OWNER` |
 | **Hotel Name** | Kashi Heritage Haveli |
 | **Location** | Assi Ghat Road, Varanasi, Uttar Pradesh |
 | **Data Seeded** | 3 Floors, 8 Rooms in diverse states (Occupied, Clean, Dirty, Maintenance Blocked), Smart TVs, ACs, King Bedsheets, Active Guest Stays, Housekeeping Checklists, Maintenance Tickets, Expenses, Utility Meters |
 
-*(A **"Use Demo Account"** one-click button is available directly on the login screen).*
+*(A **"Use Demo Account"** one-click button is available directly on the login screen during development).*
 
 ---
 

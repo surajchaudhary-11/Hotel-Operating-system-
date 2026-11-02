@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from app.core.config import settings
 from app.core.security import get_password_hash
 from app.models.models import (
     User, Hotel, HotelMembership, Floor, RoomType, Room,
@@ -11,6 +12,10 @@ from app.models.models import (
 )
 
 async def seed_initial_data(db: AsyncSession):
+    # Strictly forbid demo seeding in production environments
+    if settings.ENVIRONMENT.lower() == "production" or not settings.ENABLE_DEMO_SEEDING:
+        return
+
     # Check if already seeded
     res = await db.execute(select(User).where(User.email == "owner@kashiheritage.com"))
     if res.scalar_one_or_none():

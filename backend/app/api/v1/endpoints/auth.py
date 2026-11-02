@@ -6,10 +6,11 @@ from app.core.security import verify_password, get_password_hash, create_access_
 from app.core.dependencies import get_current_user
 from app.models.models import User, HotelMembership, Hotel
 from app.schemas.schemas import UserRegister, UserLogin, UserResponse, TokenResponse
+from app.core.rate_limit import login_rate_limiter, rate_limit_dependency
 
 router = APIRouter()
 
-@router.post("/register", response_model=TokenResponse)
+@router.post("/register", response_model=TokenResponse, dependencies=[Depends(rate_limit_dependency(login_rate_limiter))])
 async def register_user(data: UserRegister, db: AsyncSession = Depends(get_db)):
     # Check if user already exists
     res = await db.execute(select(User).where(User.email == data.email))
@@ -37,7 +38,7 @@ async def register_user(data: UserRegister, db: AsyncSession = Depends(get_db)):
         memberships=[]
     )
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=TokenResponse, dependencies=[Depends(rate_limit_dependency(login_rate_limiter))])
 async def login_user(data: UserLogin, db: AsyncSession = Depends(get_db)):
     res = await db.execute(select(User).where(User.email == data.email))
     user = res.scalar_one_or_none()

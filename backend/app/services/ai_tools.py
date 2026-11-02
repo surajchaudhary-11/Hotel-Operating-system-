@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, and_
 
 from app.core.dependencies import TenantContext
+from app.core.timezone import get_hotel_today
 from app.models.models import (
     Room, RoomType, Floor, GuestStay, Guest, Payment, Revenue, Expense,
     HousekeepingTask, CleaningChecklist, RoomInspection,
@@ -284,7 +285,7 @@ async def tool_get_today_bookings(
     ctx: TenantContext
 ) -> Dict[str, Any]:
     """Retrieves check-ins and check-outs scheduled or executed for today."""
-    today = date.today()
+    today = get_hotel_today(ctx.hotel.timezone if ctx.hotel else "Asia/Kolkata")
     stmt = (
         select(GuestStay, Guest, Room)
         .join(Guest, GuestStay.guest_id == Guest.id)
@@ -339,7 +340,7 @@ async def tool_get_today_checkins(
     ctx: TenantContext
 ) -> Dict[str, Any]:
     """Retrieves only today's arrivals and check-ins."""
-    today = date.today()
+    today = get_hotel_today(ctx.hotel.timezone if ctx.hotel else "Asia/Kolkata")
     stmt = (
         select(GuestStay, Guest, Room)
         .join(Guest, GuestStay.guest_id == Guest.id)
@@ -371,7 +372,7 @@ async def tool_get_today_checkouts(
     ctx: TenantContext
 ) -> Dict[str, Any]:
     """Retrieves only today's scheduled departures and check-outs."""
-    today = date.today()
+    today = get_hotel_today(ctx.hotel.timezone if ctx.hotel else "Asia/Kolkata")
     stmt = (
         select(GuestStay, Guest, Room)
         .join(Guest, GuestStay.guest_id == Guest.id)
@@ -404,7 +405,7 @@ async def tool_get_upcoming_reservations(
     days: int = 7
 ) -> Dict[str, Any]:
     """Retrieves reservations and stays scheduled across the next N days."""
-    today = date.today()
+    today = get_hotel_today(ctx.hotel.timezone if ctx.hotel else "Asia/Kolkata")
     end_date = today + timedelta(days=days)
     stmt = (
         select(GuestStay, Guest, Room)
@@ -839,7 +840,7 @@ async def tool_get_revenue_summary(
             "message": f"Access Denied: Role '{ctx.role}' is not authorized to view financial records."
         }
 
-    today = date.today()
+    today = get_hotel_today(ctx.hotel.timezone if ctx.hotel else "Asia/Kolkata")
     if period.lower() == "yesterday":
         start_date = today - timedelta(days=1)
         end_date = start_date

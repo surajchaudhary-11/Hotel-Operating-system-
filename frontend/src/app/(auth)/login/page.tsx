@@ -97,17 +97,21 @@ export default function LoginPage() {
           </button>
         </form>
 
-        {/* Demo Account Quick Pill */}
-        <div className="mt-6 pt-6 border-t border-slate-100 flex flex-col items-center gap-3">
-          <button
-            type="button"
-            onClick={handleFillDemo}
-            className="w-full py-2.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-2 transition border border-slate-200"
-          >
-            <Sparkles size={14} className="text-azure-600" />
-            <span>Use Demo Account (Varanasi Hotel Owner)</span>
-          </button>
+        {/* Demo Account Quick Pill (Gated for non-production / demo environments) */}
+        {(process.env.NEXT_PUBLIC_ENABLE_DEMO_LOGIN === "true" || (process.env.NODE_ENV !== "production" && process.env.NEXT_PUBLIC_ENABLE_DEMO_LOGIN !== "false")) && (
+          <div className="mt-6 pt-6 border-t border-slate-100 flex flex-col items-center gap-3">
+            <button
+              type="button"
+              onClick={handleFillDemo}
+              className="w-full py-2.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-2 transition border border-slate-200"
+            >
+              <Sparkles size={14} className="text-azure-600" />
+              <span>Use Demo Account (Varanasi Hotel Owner)</span>
+            </button>
+          </div>
+        )}
 
+        <div className="mt-4 flex flex-col items-center">
           <p className="text-xs text-slate-500 text-center">
             New property?{" "}
             <Link href="/register" className="text-azure-600 hover:underline font-semibold">

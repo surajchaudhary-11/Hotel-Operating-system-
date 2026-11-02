@@ -902,7 +902,38 @@ class AIHotelAssistantService:
 
                     if not function_calls:
                         text_parts = [p["text"] for p in parts if "text" in p]
-                        return "\n".join(text_parts), tools_executed, None
+                        raw_text = "\n".join(text_parts)
+                        # Check if query was a consequential action that LLM answered in text without invoking function declaration
+                        q_low = query.lower()
+                        room_m = re.search(r'(?:room|कमरा|no\.?|नंबर)?\s*(\d{3,4})', q_low)
+                        room_no = room_m.group(1) if room_m else None
+                        if room_no and any(w in q_low for w in ["clean", "housekeep", "sweep", "mop", "सफाई"]) and any(w in q_low for w in ["create", "task", "बनाओ", "शुरू"]):
+                            action_id = f"act_{uuid.uuid4().hex[:10]}"
+                            action_proposal = ActionProposal(
+                                action_id=action_id,
+                                action_name="create_housekeeping_task",
+                                title="Create Housekeeping Task",
+                                parameters={"room_number": room_no, "priority": "MEDIUM", "notes": query},
+                                impact_summary=f"Proposes housekeeping task for Room {room_no}",
+                                status="pending_confirmation"
+                            )
+                            if "create_housekeeping_task" not in tools_executed:
+                                tools_executed.append("create_housekeeping_task")
+                            return raw_text, tools_executed, action_proposal
+                        elif room_no and any(w in q_low for w in ["repair", "fix", "broken", "leak", "खराब", "मरम्मत"]) and any(w in q_low for w in ["create", "log", "ticket", "बनाओ", "report"]):
+                            action_id = f"act_{uuid.uuid4().hex[:10]}"
+                            action_proposal = ActionProposal(
+                                action_id=action_id,
+                                action_name="create_maintenance_ticket",
+                                title="Create Maintenance Ticket",
+                                parameters={"room_number": room_no, "title": "Maintenance Defect", "description": query, "priority": "MEDIUM"},
+                                impact_summary=f"Proposes maintenance ticket for Room {room_no}",
+                                status="pending_confirmation"
+                            )
+                            if "create_maintenance_ticket" not in tools_executed:
+                                tools_executed.append("create_maintenance_ticket")
+                            return raw_text, tools_executed, action_proposal
+                        return raw_text, tools_executed, None
 
                     contents.append(model_content)
 
@@ -991,7 +1022,8 @@ class AIHotelAssistantService:
                 logger.warning(f"Gemini execution error with model {m_name}: {e}")
 
         # Fallback to deterministic hotel engine
-        return await cls._execute_deterministic(db=db, ctx=ctx, query=query, is_hindi=cls._detect_hindi(query), intent="HOTEL_DATA")
+        inferred_intent = classify_intent(query)
+        return await cls._execute_deterministic(db=db, ctx=ctx, query=query, is_hindi=cls._detect_hindi(query), intent=inferred_intent)
 
     # =================================================================
     # OPENAI EXECUTION ENGINE (BIMODAL)

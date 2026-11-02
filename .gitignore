@@ -9,9 +9,11 @@ ENV/
 
 # Production Build Artifacts
 .next/
+.next/cache/
 out/
 build/
 dist/
+.vercel/
 
 # Environment Variables & Secrets (CRITICAL: Never commit credentials)
 .env
@@ -22,6 +24,16 @@ dist/
 backend/.env
 frontend/.env
 frontend/.env.local
+*.pem
+*.key
+*.cert
+*.crt
+
+# Uploads and User-Generated Files
+uploads/
+backend/uploads/
+*.pdf
+reports/generated/
 
 # Databases & SQLite
 *.db
@@ -37,6 +49,8 @@ __pycache__/
 *.so
 .pytest_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .mypy_cache/
 

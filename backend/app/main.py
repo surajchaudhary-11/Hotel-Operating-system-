@@ -8,12 +8,15 @@ from app.api.v1.api import api_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: seed database with initial hotel demo records if not present
-    async with AsyncSessionLocal() as session:
-        try:
-            await seed_initial_data(session)
-        except Exception as e:
-            print(f"[Startup Seed Error] {e}")
+    # Startup: seed database with initial hotel demo records only in non-production environments
+    if settings.ENVIRONMENT.lower() != "production" and settings.ENABLE_DEMO_SEEDING:
+        async with AsyncSessionLocal() as session:
+            try:
+                await seed_initial_data(session)
+            except Exception as e:
+                print(f"[Startup Seed Error] {e}")
+    else:
+        print(f"[Startup] Demo seeding disabled for ENVIRONMENT={settings.ENVIRONMENT}")
     yield
     # Shutdown logic if any
 

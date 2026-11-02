@@ -6,10 +6,11 @@ from app.core.dependencies import get_tenant_context, TenantContext
 from app.models.models import AssistantConversation, AssistantMessage
 from app.schemas.schemas import AIChatRequest, AIChatResponse
 from app.services.ai_service import AIHotelAssistantService
+from app.core.rate_limit import ai_chat_rate_limiter, rate_limit_dependency
 
 router = APIRouter()
 
-@router.post("/chat", response_model=AIChatResponse)
+@router.post("/chat", response_model=AIChatResponse, dependencies=[Depends(rate_limit_dependency(ai_chat_rate_limiter, key_func=lambda req: req.headers.get("X-Hotel-ID", req.client.host if req.client else "unknown")))])
 async def chat_with_assistant(
     data: AIChatRequest,
     ctx: TenantContext = Depends(get_tenant_context),

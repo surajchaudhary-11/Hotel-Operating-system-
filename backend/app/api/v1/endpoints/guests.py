@@ -1,10 +1,14 @@
-from datetime import datetime, timezone
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
 from app.core.dependencies import get_tenant_context, require_roles, TenantContext
+from app.core.rate_limit import digital_checkin_rate_limiter, rate_limit_dependency
+from app.services.ai_tools import mask_phone
 from app.models.models import Guest, GuestStay, Room, Payment, Revenue, GuestRequest
 from app.schemas.schemas import (
     GuestRegistrationRequest, GuestCheckInCreate, GuestCheckOutRequest,
@@ -205,18 +209,47 @@ async def check_out_guest(
 
 # ----------------- TOKENIZED DIGITAL SELF CHECK-IN -----------------
 
-@router.get("/digital-checkin/{token}")
+@router.get("/digital-checkin/{token}", dependencies=[Depends(rate_limit_dependency(digital_checkin_rate_limiter))])
 async def get_digital_checkin_details(token: str, db: AsyncSession = Depends(get_db)):
-    res = await db.execute(select(GuestStay, Guest, Room).join(Guest, GuestStay.guest_id == Guest.id).join(Room, GuestStay.room_id == Room.id).where(GuestStay.registration_token == token))
+    # Check for invalidated tokens
+    if token.startswith("used_") or token.startswith("expired_"):
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="This check-in link has already been used.")
+
+    res = await db.execute(
+        select(GuestStay, Guest, Room)
+        .join(Guest, GuestStay.guest_id == Guest.id)
+        .join(Room, GuestStay.room_id == Room.id)
+        .where(GuestStay.registration_token == token)
+    )
     row = res.first()
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invalid or expired check-in link")
 
     stay, guest, room = row
+
+    # Disallow accessing completed or cancelled stays
+    if stay.status in ["CHECKED_OUT", "CANCELLED", "NO_SHOW"]:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail=f"This check-in link is no longer active (Stay status: {stay.status})."
+        )
+
+    # Expiry verification
+    now_utc = datetime.now(timezone.utc)
+    if stay.expected_check_out_time:
+        exp_time = stay.expected_check_out_time
+        if exp_time.tzinfo is None:
+            exp_time = exp_time.replace(tzinfo=timezone.utc)
+        if now_utc > exp_time + timedelta(days=1):
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail="This check-in link has expired."
+            )
+
     return {
         "stay_id": stay.id,
         "guest_name": guest.full_name,
-        "guest_phone": guest.phone,
+        "guest_phone": mask_phone(guest.phone), # Redacted to protect guest PII from public URL scraping
         "room_number": room.room_number,
         "check_in_time": stay.check_in_time,
         "expected_check_out_time": stay.expected_check_out_time,
@@ -225,17 +258,35 @@ async def get_digital_checkin_details(token: str, db: AsyncSession = Depends(get
         "status": stay.status
     }
 
-@router.post("/digital-checkin/{token}/submit")
+@router.post("/digital-checkin/{token}/submit", dependencies=[Depends(rate_limit_dependency(digital_checkin_rate_limiter))])
 async def submit_digital_checkin(token: str, data: GuestRegistrationRequest, db: AsyncSession = Depends(get_db)):
-    res = await db.execute(select(GuestStay, Guest).join(Guest, GuestStay.guest_id == Guest.id).where(GuestStay.registration_token == token))
+    if token.startswith("used_") or token.startswith("expired_"):
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="This check-in link has already been used.")
+
+    res = await db.execute(
+        select(GuestStay, Guest)
+        .join(Guest, GuestStay.guest_id == Guest.id)
+        .where(GuestStay.registration_token == token)
+    )
     row = res.first()
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invalid registration link")
 
     stay, guest = row
+    if stay.status in ["CHECKED_OUT", "CANCELLED", "NO_SHOW"]:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail=f"Registration closed for this stay (Status: {stay.status})."
+        )
+
     masked_id = data.id_number_masked
-    if masked_id and len(masked_id) > 4:
-        masked_id = "X" * (len(masked_id) - 4) + masked_id[-4:]
+    if masked_id:
+        # Aadhaar DPDP compliance: mask all but last 4 digits
+        clean_id = re.sub(r'[\s-]', '', masked_id)
+        if len(clean_id) >= 4:
+            masked_id = "X" * (len(clean_id) - 4) + clean_id[-4:]
+        else:
+            masked_id = "****"
 
     guest.full_name = data.full_name
     guest.email = data.email
@@ -244,6 +295,9 @@ async def submit_digital_checkin(token: str, data: GuestRegistrationRequest, db:
     guest.id_number_masked = masked_id
     guest.city = data.city
     guest.state = data.state
+
+    # Invalidate token to prevent replay attack / tampering after submission
+    stay.registration_token = f"used_{uuid.uuid4().hex[:16]}"
 
     await db.commit()
     return {"message": "Digital check-in details submitted successfully. Welcome to HotelOS!"}

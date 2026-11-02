@@ -13,6 +13,7 @@ from app.schemas.schemas import (
     FinancialSummaryResponse, RoomProfitabilityItem, ScenarioSimulationRequest, ScenarioSimulationResponse
 )
 from app.services.profitability import ProfitabilityService
+from app.core.timezone import get_hotel_today
 
 router = APIRouter()
 
@@ -21,7 +22,7 @@ async def get_financial_summary(
     ctx: TenantContext = Depends(require_roles(["OWNER", "MANAGER", "ACCOUNTANT"])),
     db: AsyncSession = Depends(get_db)
 ):
-    today = date.today()
+    today = get_hotel_today(ctx.hotel.timezone if ctx.hotel else "Asia/Kolkata")
     month_start = today.replace(day=1)
 
     # Today's earned revenue
@@ -169,7 +170,7 @@ async def get_room_profitability(
     ctx: TenantContext = Depends(require_roles(["OWNER", "MANAGER", "ACCOUNTANT"])),
     db: AsyncSession = Depends(get_db)
 ):
-    today = date.today()
+    today = get_hotel_today(ctx.hotel.timezone if ctx.hotel else "Asia/Kolkata")
     start_date = today.replace(day=1) # Month to date
     return await ProfitabilityService.get_hotel_room_profitability(
         db=db,
