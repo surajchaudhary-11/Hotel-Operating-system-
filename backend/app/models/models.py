@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 from datetime import datetime, timezone, date, time
 from sqlalchemy import (
     Column, String, Integer, Numeric, Boolean, Date, Time, DateTime, 
@@ -489,7 +490,27 @@ class GuestStay(TimeStampedBase):
     room = relationship("Room", back_populates="stays")
     revenues = relationship("Revenue", back_populates="stay")
     payments = relationship("Payment", back_populates="stay")
+    refunds = relationship("Refund", back_populates="stay", lazy="selectin")
     requests = relationship("GuestRequest", back_populates="stay", cascade="all, delete-orphan")
+
+    @property
+    def derived_payment_status(self) -> str:
+        """Derives payment status dynamically from the transaction ledger and outstanding balance."""
+        total_charges = (
+            (self.total_room_charge or Decimal("0.00")) +
+            (self.total_tax_charge or Decimal("0.00")) +
+            (self.total_additional_charge or Decimal("0.00"))
+        )
+        paid = self.total_paid or Decimal("0.00")
+        if total_charges > Decimal("0.00") and paid >= total_charges:
+            return "PAID"
+        elif paid > Decimal("0.00"):
+            return "PARTIALLY_PAID"
+        elif self.status == "CANCELLED":
+            refunds = self.__dict__.get("refunds")
+            if (refunds and len(refunds) > 0 and paid == Decimal("0.00")) or self.payment_status == "REFUNDED":
+                return "REFUNDED"
+        return "UNPAID"
 
 
 class GuestDocument(Base):
@@ -602,6 +623,8 @@ class Refund(Base):
     reason = Column(Text, nullable=False)
     approved_by_user_id = Column(String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     refund_date = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    stay = relationship("GuestStay", back_populates="refunds")
 
 
 class Budget(Base):

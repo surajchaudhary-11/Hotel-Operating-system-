@@ -51,3 +51,4 @@ def downgrade() -> None:
         batch_op.drop_column('external_reference_id')
         batch_op.drop_column('booking_source')
         batch_op.drop_column('booking_reference')
+

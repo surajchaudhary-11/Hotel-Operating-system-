@@ -571,3 +571,247 @@ async def test_role_based_access_control_reservations():
         res = await client.get("/api/v1/reservations", headers=hk_headers)
         assert res.status_code == 403
         assert "Operation not permitted" in res.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_derived_payment_status_lifecycle():
+    """Verify that payment_status is strictly derived from the financial ledger and balance due."""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        _, _, headers = await get_auth_context(client)
+        room = (await client.get("/api/v1/rooms", headers=headers)).json()[7]
+
+        now = datetime.now(timezone.utc)
+        c_in = (now + timedelta(days=35)).isoformat()
+        c_out = (now + timedelta(days=37)).isoformat()
+
+        # 1. 0 Advance -> Status must be UNPAID
+        res = await client.post("/api/v1/reservations", json={
+            "room_id": room["id"],
+            "check_in_time": c_in,
+            "expected_check_out_time": c_out,
+            "room_rate_per_night": 2000.0,
+            "advance_payment_amount": 0.0,
+            "guest_info": {"full_name": "Ledger Test Guest", "phone": "+91 9999990001"}
+        }, headers=headers)
+        data = res.json()
+        stay_id = data["id"]
+        assert data["payment_status"] == "UNPAID"
+
+        # 2. Partial payment -> Status must be PARTIALLY_PAID
+        pay_res1 = await client.post(f"/api/v1/reservations/{stay_id}/payments", json={
+            "amount": 1000.0,
+            "payment_mode": "UPI_QR",
+            "transaction_reference": "UTR-11223344"
+        }, headers=headers)
+        assert pay_res1.status_code == 200
+        assert pay_res1.json()["payment_status"] == "PARTIALLY_PAID"
+
+        # 3. Full payment settlement -> Status must be PAID
+        balance = pay_res1.json()["balance_due"]
+        pay_res2 = await client.post(f"/api/v1/reservations/{stay_id}/payments", json={
+            "amount": balance,
+            "payment_mode": "CREDIT_DEBIT_CARD",
+            "transaction_reference": "POS-SLIP-8899"
+        }, headers=headers)
+        assert pay_res2.status_code == 200
+        assert pay_res2.json()["payment_status"] == "PAID"
+        assert Decimal(str(pay_res2.json()["balance_due"])) == Decimal("0.00")
+
+        # 4. Cancel with full refund -> Status must derive to REFUNDED
+        cancel_res = await client.post(f"/api/v1/reservations/{stay_id}/cancel", json={
+            "cancellation_reason": "Emergency trip cancellation",
+            "refund_amount": pay_res2.json()["total_paid"]
+        }, headers=headers)
+        assert cancel_res.status_code == 200
+        assert cancel_res.json()["payment_status"] == "REFUNDED"
+
+
+@pytest.mark.asyncio
+async def test_multi_session_concurrent_reservation_collision():
+    """
+    Test genuine concurrency using separate AsyncSession database sessions.
+    Two workers with independent DB sessions race to book the same room on overlapping dates.
+    Exactly one succeeds and one receives 409 Conflict.
+    """
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        _, hotel_id, headers = await get_auth_context(client)
+        room = (await client.get("/api/v1/rooms", headers=headers)).json()[0]
+
+    from app.api.v1.endpoints.reservations import create_reservation, ReservationCreate
+    from app.schemas.schemas import GuestRegistrationRequest
+    from app.core.dependencies import TenantContext
+
+    now = datetime.now(timezone.utc)
+    c_in = (now + timedelta(days=40)).replace(hour=12, minute=0, second=0, microsecond=0)
+    c_out = (now + timedelta(days=43)).replace(hour=11, minute=0, second=0, microsecond=0)
+
+    req1 = ReservationCreate(
+        room_id=room["id"],
+        check_in_time=c_in,
+        expected_check_out_time=c_out,
+        room_rate_per_night=Decimal("3000.00"),
+        booking_source="DIRECT",
+        guest_info=GuestRegistrationRequest(full_name="Worker 1 Guest", phone="+91 9999900001")
+    )
+    req2 = ReservationCreate(
+        room_id=room["id"],
+        check_in_time=c_in,
+        expected_check_out_time=c_out,
+        room_rate_per_night=Decimal("3000.00"),
+        booking_source="DIRECT",
+        guest_info=GuestRegistrationRequest(full_name="Worker 2 Guest", phone="+91 9999900002")
+    )
+
+    results = []
+
+    async def worker(req):
+        async with AsyncSessionLocal() as session:
+            user = (await session.execute(select(User).where(User.email == "owner@kashiheritage.com"))).scalar_one()
+            hotel = (await session.execute(select(Hotel).where(Hotel.id == hotel_id))).scalar_one()
+            ctx = TenantContext(hotel_id=hotel_id, role="OWNER", hotel=hotel, user=user)
+            try:
+                res = await create_reservation(req, ctx=ctx, db=session)
+                results.append(("SUCCESS", res.booking_reference))
+            except Exception as e:
+                results.append(("CONFLICT", str(e)))
+            except Exception as e:
+                results.append(("CONFLICT", str(e)))
+
+    await asyncio.gather(worker(req1), worker(req2))
+
+    successes = [r for r in results if r[0] == "SUCCESS"]
+    conflicts = [r for r in results if r[0] == "CONFLICT"]
+
+    assert len(successes) == 1, f"Exactly one worker must succeed. Got: {results}"
+    assert len(conflicts) == 1, f"Exactly one worker must receive collision. Got: {results}"
+    assert "already booked" in conflicts[0][1]
+
+
+@pytest.mark.asyncio
+async def test_checkin_onto_maintenance_blocked_room_rejected():
+    """Verify check-in is rejected if the assigned room is currently BLOCKED_MAINTENANCE."""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        _, _, headers = await get_auth_context(client)
+        rooms = (await client.get("/api/v1/rooms", headers=headers)).json()
+        target_room = rooms[1]
+
+        now = datetime.now(timezone.utc)
+        create_res = await client.post("/api/v1/reservations", json={
+            "room_id": target_room["id"],
+            "check_in_time": now.isoformat(),
+            "expected_check_out_time": (now + timedelta(days=2)).isoformat(),
+            "room_rate_per_night": 2500.0,
+            "guest_info": {"full_name": "Blocked Room Guest", "phone": "+91 9999900003"}
+        }, headers=headers)
+        stay_id = create_res.json()["id"]
+
+        # Manually set room to BLOCKED_MAINTENANCE in DB
+        async with AsyncSessionLocal() as session:
+            r = await session.get(Room, target_room["id"])
+            r.status = "BLOCKED_MAINTENANCE"
+            await session.commit()
+
+        # Checkin attempt must fail with 400
+        checkin_res = await client.post(f"/api/v1/reservations/{stay_id}/checkin", headers=headers)
+        assert checkin_res.status_code == 400
+        assert "blocked for maintenance" in checkin_res.json()["detail"].lower()
+
+        # Restore room status
+        async with AsyncSessionLocal() as session:
+            r = await session.get(Room, target_room["id"])
+            r.status = "VACANT_CLEAN"
+            await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_restriction_cannot_edit_checkin_time_for_in_house_stay():
+    """Verify in-house guests cannot have their check-in time edited after commencement."""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        _, _, headers = await get_auth_context(client)
+        room = (await client.get("/api/v1/rooms", headers=headers)).json()[2]
+
+        now = datetime.now(timezone.utc)
+        create_res = await client.post("/api/v1/reservations", json={
+            "room_id": room["id"],
+            "check_in_time": now.isoformat(),
+            "expected_check_out_time": (now + timedelta(days=2)).isoformat(),
+            "room_rate_per_night": 2500.0,
+            "guest_info": {"full_name": "In House Edit Guest", "phone": "+91 9999900004"}
+        }, headers=headers)
+        stay_id = create_res.json()["id"]
+
+        # Check in
+        await client.post(f"/api/v1/reservations/{stay_id}/checkin", headers=headers)
+
+        # Attempt to edit check-in date
+        new_in = (now - timedelta(days=1)).isoformat()
+        edit_res = await client.put(f"/api/v1/reservations/{stay_id}", json={
+            "check_in_time": new_in
+        }, headers=headers)
+        assert edit_res.status_code == 400
+        assert "Cannot modify check-in time of an in-house guest" in edit_res.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_electronic_payment_requires_transaction_reference():
+    """Verify electronic payments (UPI, Card, Bank Transfer) enforce non-empty transaction references."""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        _, _, headers = await get_auth_context(client)
+        room = (await client.get("/api/v1/rooms", headers=headers)).json()[3]
+
+        now = datetime.now(timezone.utc)
+        create_res = await client.post("/api/v1/reservations", json={
+            "room_id": room["id"],
+            "check_in_time": (now + timedelta(days=45)).isoformat(),
+            "expected_check_out_time": (now + timedelta(days=47)).isoformat(),
+            "room_rate_per_night": 2500.0,
+            "guest_info": {"full_name": "Ref Test Guest", "phone": "+91 9999900005"}
+        }, headers=headers)
+        stay_id = create_res.json()["id"]
+
+        # Attempt electronic payment with empty reference -> 400
+        pay_res = await client.post(f"/api/v1/reservations/{stay_id}/payments", json={
+            "amount": 1000.0,
+            "payment_mode": "UPI_QR",
+            "transaction_reference": ""
+        }, headers=headers)
+        assert pay_res.status_code == 400
+        assert "Transaction reference" in pay_res.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_audit_log_records_before_and_after_snapshots():
+    """Verify ActivityLog records authenticated user, action, and before/after state diffs."""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        _, hotel_id, headers = await get_auth_context(client)
+        room = (await client.get("/api/v1/rooms", headers=headers)).json()[4]
+
+        now = datetime.now(timezone.utc)
+        create_res = await client.post("/api/v1/reservations", json={
+            "room_id": room["id"],
+            "check_in_time": (now + timedelta(days=50)).isoformat(),
+            "expected_check_out_time": (now + timedelta(days=53)).isoformat(),
+            "room_rate_per_night": 3000.0,
+            "guest_info": {"full_name": "Audit Diff Guest", "phone": "+91 9999900006"}
+        }, headers=headers)
+        stay_id = create_res.json()["id"]
+
+        # Update reservation
+        await client.put(f"/api/v1/reservations/{stay_id}", json={
+            "room_rate_per_night": 3500.0,
+            "special_requests": "Extra quiet room"
+        }, headers=headers)
+
+        # Query ActivityLog from DB
+        async with AsyncSessionLocal() as session:
+            logs = (await session.execute(
+                select(ActivityLog)
+                .where(ActivityLog.entity_id == stay_id, ActivityLog.action_type == "UPDATE")
+            )).scalars().all()
+            assert len(logs) >= 1
+            latest_log = logs[-1]
+            assert "before" in latest_log.details
+            assert "after" in latest_log.details
+            assert Decimal(latest_log.details["before"]["room_rate_per_night"]) == Decimal("3000.00")
+            assert Decimal(latest_log.details["after"]["room_rate_per_night"]) == Decimal("3500.00")
+

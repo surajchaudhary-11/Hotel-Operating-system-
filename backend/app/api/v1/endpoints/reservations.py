@@ -81,6 +81,15 @@ async def check_room_availability_atomic(
             detail=f"Room with id '{room_id}' not found in this hotel"
         )
 
+    # Check if room is blocked for maintenance
+    if room.status == "BLOCKED_MAINTENANCE":
+        now_date = datetime.now(timezone.utc).date()
+        if check_in.date() <= now_date:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Room {room.room_number} is currently blocked for maintenance"
+            )
+
     # 2. Overlap query using half-open interval semantics:
     # Overlap occurs when: existing.check_in_time < req_check_out AND existing.expected_check_out_time > req_check_in
     overlap_stmt = (
@@ -115,6 +124,8 @@ async def check_room_availability_atomic(
 
 
 def build_reservation_response(stay: GuestStay, guest: Guest, room: Room, room_type: Optional[RoomType], floor: Optional[Floor]) -> ReservationResponse:
+    # payment_status is derived directly from the transaction ledger and outstanding balance
+    derived_status = stay.derived_payment_status
     return ReservationResponse(
         id=stay.id,
         hotel_id=stay.hotel_id,
@@ -142,7 +153,7 @@ def build_reservation_response(stay: GuestStay, guest: Guest, room: Room, room_t
         total_additional_charge=stay.total_additional_charge,
         total_paid=stay.total_paid,
         balance_due=stay.balance_due,
-        payment_status=stay.payment_status or "UNPAID",
+        payment_status=derived_status,
         special_requests=stay.special_requests,
         estimated_arrival_time=stay.estimated_arrival_time,
         cancellation_reason=stay.cancellation_reason,
@@ -272,7 +283,7 @@ async def get_tape_chart(
             check_out_date=stay.expected_check_out_time.date(),
             status=stay.status,
             booking_source=stay.booking_source or "DIRECT",
-            payment_status=stay.payment_status or "UNPAID",
+            payment_status=stay.derived_payment_status,
             total_paid=stay.total_paid,
             balance_due=stay.balance_due
         )
@@ -581,94 +592,115 @@ async def create_group_reservation(
     # Advance deposit allocation across rooms
     advance_per_room = (data.advance_payment_amount / Decimal(len(data.rooms))) if data.advance_payment_amount > 0 else Decimal("0.00")
 
-    for idx, item in enumerate(data.rooms):
-        # Atomic lock & availability check
-        room = await check_room_availability_atomic(db, ctx.hotel_id, item.room_id, check_in, check_out)
+    # Consistent ascending order room locking to prevent database deadlocks
+    unique_room_ids = sorted(list(set(item.room_id for item in data.rooms)))
+    acquired_locks = []
+    if db.bind.dialect.name == "postgresql":
+        for rid in unique_room_ids:
+            await db.execute(select(Room.id).where(Room.id == rid, Room.hotel_id == ctx.hotel_id).with_for_update())
+    else:
+        for rid in unique_room_ids:
+            l = await get_room_lock(ctx.hotel_id, rid)
+            await l.acquire()
+            acquired_locks.append(l)
 
-        # Room occupant guest
-        stay_guest = primary_guest
-        if item.guest_info:
-            stay_guest = Guest(
+    try:
+        for idx, item in enumerate(data.rooms):
+            # Atomic lock & availability check
+            room = await check_room_availability_atomic(db, ctx.hotel_id, item.room_id, check_in, check_out)
+
+            # Room occupant guest
+            stay_guest = primary_guest
+            if item.guest_info:
+                stay_guest = Guest(
+                    hotel_id=ctx.hotel_id,
+                    full_name=item.guest_info.full_name,
+                    email=item.guest_info.email,
+                    phone=item.guest_info.phone,
+                    id_type=item.guest_info.id_type or "GOVT_ID",
+                    id_number_masked=item.guest_info.id_number_masked,
+                    nationality=item.guest_info.nationality,
+                    city=item.guest_info.city,
+                    state=item.guest_info.state
+                )
+                db.add(stay_guest)
+                await db.flush()
+
+            room_charge = item.room_rate_per_night * Decimal(nights)
+            tax = round(room_charge * Decimal("0.12"), 2)
+            total_due = room_charge + tax
+            paid = min(advance_per_room, total_due)
+            balance = total_due - paid
+
+            booking_ref = f"{generate_booking_ref(now)}-{idx + 1}"
+
+            stay = GuestStay(
                 hotel_id=ctx.hotel_id,
-                full_name=item.guest_info.full_name,
-                email=item.guest_info.email,
-                phone=item.guest_info.phone,
-                id_type=item.guest_info.id_type or "GOVT_ID",
-                id_number_masked=item.guest_info.id_number_masked,
-                nationality=item.guest_info.nationality,
-                city=item.guest_info.city,
-                state=item.guest_info.state
+                guest_id=stay_guest.id,
+                room_id=room.id,
+                check_in_time=check_in,
+                expected_check_out_time=check_out,
+                status="RESERVED",
+                adult_count=item.adult_count,
+                child_count=item.child_count,
+                room_rate_per_night=item.room_rate_per_night,
+                total_room_charge=room_charge,
+                total_tax_charge=tax,
+                total_additional_charge=Decimal("0.00"),
+                total_paid=paid,
+                balance_due=balance,
+                booking_reference=booking_ref,
+                booking_source=data.booking_source.upper(),
+                external_reference_id=data.external_reference_id,
+                group_booking_id=group_id,
+                special_requests=data.special_requests,
+                estimated_arrival_time=data.estimated_arrival_time,
+                payment_status="PAID" if paid >= total_due else ("PARTIALLY_PAID" if paid > 0 else "UNPAID")
             )
-            db.add(stay_guest)
+            db.add(stay)
             await db.flush()
 
-        room_charge = item.room_rate_per_night * Decimal(nights)
-        tax = round(room_charge * Decimal("0.12"), 2)
-        total_due = room_charge + tax
-        paid = min(advance_per_room, total_due)
-        balance = total_due - paid
-
-        pay_status = "PAID" if paid >= total_due else ("PARTIALLY_PAID" if paid > 0 else "UNPAID")
-        booking_ref = f"{generate_booking_ref(now)}-{idx + 1}"
-
-        stay = GuestStay(
-            hotel_id=ctx.hotel_id,
-            guest_id=stay_guest.id,
-            room_id=room.id,
-            check_in_time=check_in,
-            expected_check_out_time=check_out,
-            status="RESERVED",
-            adult_count=item.adult_count,
-            child_count=item.child_count,
-            room_rate_per_night=item.room_rate_per_night,
-            total_room_charge=room_charge,
-            total_tax_charge=tax,
-            total_additional_charge=Decimal("0.00"),
-            total_paid=paid,
-            balance_due=balance,
-            booking_reference=booking_ref,
-            booking_source=data.booking_source.upper(),
-            external_reference_id=data.external_reference_id,
-            group_booking_id=group_id,
-            special_requests=data.special_requests,
-            estimated_arrival_time=data.estimated_arrival_time,
-            payment_status=pay_status
-        )
-        db.add(stay)
-        await db.flush()
-
-        if paid > Decimal("0.00"):
-            db.add(
-                Payment(
-                    hotel_id=ctx.hotel_id,
-                    stay_id=stay.id,
-                    amount=paid,
-                    payment_mode=data.advance_payment_mode or "UPI_QR",
-                    transaction_reference=f"GRP-DEP-{booking_ref}",
-                    collected_by_user_id=ctx.user.id
+            if paid > Decimal("0.00"):
+                db.add(
+                    Payment(
+                        hotel_id=ctx.hotel_id,
+                        stay_id=stay.id,
+                        amount=paid,
+                        payment_mode=data.advance_payment_mode or "UPI_QR",
+                        transaction_reference=f"GRP-DEP-{booking_ref}",
+                        collected_by_user_id=ctx.user.id
+                    )
                 )
+
+            created_stays.append((stay, stay_guest, room))
+
+        # Audit Log with before/after state
+        db.add(
+            ActivityLog(
+                hotel_id=ctx.hotel_id,
+                user_id=ctx.user.id,
+                action_type="CREATE",
+                entity_type="STAY",
+                entity_id=group_id,
+                details={
+                    "action": "CREATE_GROUP_RESERVATION",
+                    "group_booking_id": group_id,
+                    "room_count": len(created_stays),
+                    "total_advance_paid": str(data.advance_payment_amount),
+                    "before": None,
+                    "after": {
+                        "group_booking_id": group_id,
+                        "room_ids": [s.room_id for s, _, _ in created_stays],
+                        "booking_references": [s.booking_reference for s, _, _ in created_stays]
+                    }
+                }
             )
-
-        created_stays.append((stay, stay_guest, room))
-
-    # Audit Log
-    db.add(
-        ActivityLog(
-            hotel_id=ctx.hotel_id,
-            user_id=ctx.user.id,
-            action_type="CREATE",
-            entity_type="STAY",
-            entity_id=group_id,
-            details={
-                "action": "CREATE_GROUP_RESERVATION",
-                "group_booking_id": group_id,
-                "room_count": len(created_stays),
-                "total_advance_paid": str(data.advance_payment_amount)
-            }
         )
-    )
 
-    await db.commit()
+        await db.commit()
+    finally:
+        for l in reversed(acquired_locks):
+            l.release()
 
     responses = []
     for stay, guest, room in created_stays:
@@ -726,6 +758,25 @@ async def update_reservation(
             detail=f"Cannot edit reservation with status '{stay.status}'"
         )
 
+    # Restriction: In-house stays cannot modify check-in time (stay already in progress)
+    if stay.status == "CHECKED_IN" and data.check_in_time:
+        requested_in = normalize_datetime(data.check_in_time, time(12, 0))
+        if requested_in != stay.check_in_time:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot modify check-in time of an in-house guest. Stay has already commenced."
+            )
+
+    before_state = {
+        "check_in_time": stay.check_in_time.isoformat(),
+        "expected_check_out_time": stay.expected_check_out_time.isoformat(),
+        "room_rate_per_night": str(stay.room_rate_per_night),
+        "adult_count": stay.adult_count,
+        "child_count": stay.child_count,
+        "booking_source": stay.booking_source,
+        "total_room_charge": str(stay.total_room_charge)
+    }
+
     # If dates changed, re-validate half-open availability
     new_in = normalize_datetime(data.check_in_time, time(12, 0)) if data.check_in_time else stay.check_in_time
     new_out = normalize_datetime(data.expected_check_out_time, time(11, 0)) if data.expected_check_out_time else stay.expected_check_out_time
@@ -762,15 +813,19 @@ async def update_reservation(
     stay.total_tax_charge = round(stay.total_room_charge * Decimal("0.12"), 2)
     total_due = stay.total_room_charge + stay.total_tax_charge + stay.total_additional_charge
     stay.balance_due = max(Decimal("0.00"), total_due - stay.total_paid)
+    stay.payment_status = stay.derived_payment_status
 
-    if stay.total_paid >= total_due:
-        stay.payment_status = "PAID"
-    elif stay.total_paid > Decimal("0.00"):
-        stay.payment_status = "PARTIALLY_PAID"
-    else:
-        stay.payment_status = "UNPAID"
+    after_state = {
+        "check_in_time": stay.check_in_time.isoformat(),
+        "expected_check_out_time": stay.expected_check_out_time.isoformat(),
+        "room_rate_per_night": str(stay.room_rate_per_night),
+        "adult_count": stay.adult_count,
+        "child_count": stay.child_count,
+        "booking_source": stay.booking_source,
+        "total_room_charge": str(stay.total_room_charge)
+    }
 
-    # Audit Log
+    # Audit Log with Before/After Diff
     db.add(
         ActivityLog(
             hotel_id=ctx.hotel_id,
@@ -780,8 +835,8 @@ async def update_reservation(
             entity_id=stay.id,
             details={
                 "action": "UPDATE_RESERVATION",
-                "nights": nights,
-                "total_room_charge": str(stay.total_room_charge)
+                "before": before_state,
+                "after": after_state
             }
         )
     )
@@ -838,7 +893,7 @@ async def cancel_reservation(
         stay.total_paid = max(Decimal("0.00"), stay.total_paid - data.refund_amount)
         stay.payment_status = "REFUNDED" if stay.total_paid == 0 else "PARTIALLY_PAID"
 
-    # Audit log
+    # Audit log with before/after state
     db.add(
         ActivityLog(
             hotel_id=ctx.hotel_id,
@@ -848,8 +903,8 @@ async def cancel_reservation(
             entity_id=stay.id,
             details={
                 "action": "CANCEL_RESERVATION",
-                "reason": data.cancellation_reason,
-                "refunded": str(data.refund_amount)
+                "before": {"status": "RESERVED", "total_paid": str(stay.total_paid + (data.refund_amount if data.refund_amount else Decimal("0.00")))},
+                "after": {"status": "CANCELLED", "cancellation_reason": data.cancellation_reason, "refund_amount": str(data.refund_amount), "total_paid": str(stay.total_paid)}
             }
         )
     )
@@ -888,7 +943,15 @@ async def checkin_reservation(
     if not room:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assigned room not found")
 
+    # Reject check-in if assigned room is blocked for maintenance
+    if room.status == "BLOCKED_MAINTENANCE":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot check in to Room {room.room_number}: room is currently blocked for maintenance. Please reassign the guest to an available room."
+        )
+
     now = datetime.now(timezone.utc)
+    old_room_status = room.status
     stay.status = "CHECKED_IN"
     stay.check_in_time = now
 
@@ -917,7 +980,7 @@ async def checkin_reservation(
             )
         )
 
-    # Audit log
+    # Audit log with before/after state
     db.add(
         ActivityLog(
             hotel_id=ctx.hotel_id,
@@ -927,8 +990,8 @@ async def checkin_reservation(
             entity_id=stay.id,
             details={
                 "action": "CHECK_IN_RESERVATION",
-                "room_number": room.room_number,
-                "timestamp": now.isoformat()
+                "before": {"status": "RESERVED", "room_status": old_room_status},
+                "after": {"status": "CHECKED_IN", "room_status": "OCCUPIED", "timestamp": now.isoformat()}
             }
         )
     )
@@ -984,7 +1047,7 @@ async def reassign_reservation_room(
             old_room.status = "VACANT_DIRTY"
         new_room.status = "OCCUPIED"
 
-    # Audit log
+    # Audit log with before/after diff
     db.add(
         ActivityLog(
             hotel_id=ctx.hotel_id,
@@ -994,9 +1057,8 @@ async def reassign_reservation_room(
             entity_id=stay.id,
             details={
                 "action": "REASSIGN_ROOM",
-                "old_room_number": old_room.room_number if old_room else None,
-                "new_room_number": new_room.room_number,
-                "reason": data.reason
+                "before": {"room_id": old_room_id, "room_number": old_room.room_number if old_room else None},
+                "after": {"room_id": new_room.id, "room_number": new_room.room_number, "reason": data.reason}
             }
         )
     )
@@ -1031,6 +1093,17 @@ async def add_reservation_payment(
     if stay.status in ["CANCELLED"]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot add payments to cancelled reservations")
 
+    # Payment reference verification: electronic payment modes must carry transaction reference (UTR / slip number)
+    if data.payment_mode in ["UPI_QR", "CREDIT_DEBIT_CARD", "BANK_TRANSFER"]:
+        if not data.transaction_reference or not data.transaction_reference.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Transaction reference (UTR / slip number) is mandatory for electronic payment mode '{data.payment_mode}'"
+            )
+
+    old_paid = stay.total_paid
+    old_balance = stay.balance_due
+
     # Record Payment in guest ledger (USALI liability, not earned revenue yet)
     pay = Payment(
         hotel_id=ctx.hotel_id,
@@ -1045,13 +1118,9 @@ async def add_reservation_payment(
     stay.total_paid += data.amount
     total_due = stay.total_room_charge + stay.total_tax_charge + stay.total_additional_charge
     stay.balance_due = max(Decimal("0.00"), total_due - stay.total_paid)
+    stay.payment_status = stay.derived_payment_status
 
-    if stay.total_paid >= total_due:
-        stay.payment_status = "PAID"
-    else:
-        stay.payment_status = "PARTIALLY_PAID"
-
-    # Audit log
+    # Audit log with before/after state
     db.add(
         ActivityLog(
             hotel_id=ctx.hotel_id,
@@ -1061,9 +1130,15 @@ async def add_reservation_payment(
             entity_id=stay.id,
             details={
                 "action": "RECORD_PAYMENT",
-                "amount": str(data.amount),
-                "mode": data.payment_mode,
-                "notes": data.notes
+                "payment_id": pay.id,
+                "before": {"total_paid": str(old_paid), "balance_due": str(old_balance)},
+                "after": {
+                    "amount_paid": str(data.amount),
+                    "payment_mode": data.payment_mode,
+                    "transaction_reference": pay.transaction_reference,
+                    "total_paid": str(stay.total_paid),
+                    "balance_due": str(stay.balance_due)
+                }
             }
         )
     )
