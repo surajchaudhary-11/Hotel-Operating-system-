@@ -18,7 +18,7 @@ jobs:
         working-directory: backend
     env:
       ENVIRONMENT: test
-      ENABLE_DEMO_SEEDING: "false"
+      ENABLE_DEMO_SEEDING: "true"
       SECRET_KEY: test-ci-secret-key-do-not-use-in-production
       DATABASE_URL: sqlite+aiosqlite:///./test_ci.db
       AI_PROVIDER: deterministic

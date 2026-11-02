@@ -11,7 +11,39 @@ async def setup_test_db():
     login_rate_limiter.reset()
     account_login_rate_limiter.reset()
     async with AsyncSessionLocal() as session:
-        await seed_initial_data(session)
+        await seed_initial_data(session, force=True)
+
+
+async def get_test_auth_context(
+    client: httpx.AsyncClient,
+    email: str = "owner@kashiheritage.com",
+    password: str = "HotelOS2026!"
+) -> tuple[str, str, dict]:
+    """
+    Authenticate a test user against /api/v1/auth/login.
+    Safely verifies HTTP 200 and response contract, returning token, hotel_id, and headers.
+    """
+    login_res = await client.post("/api/v1/auth/login", json={
+        "email": email,
+        "password": password
+    })
+    assert login_res.status_code == 200, (
+        f"Authentication failed: HTTP {login_res.status_code} - {login_res.text}"
+    )
+    data = login_res.json()
+    assert "access_token" in data, f"Authentication response missing 'access_token': {data}"
+    assert data.get("token_type") == "bearer", f"Expected token_type bearer: {data}"
+    assert "memberships" in data and len(data["memberships"]) >= 1, (
+        f"User {email} has no active hotel memberships: {data}"
+    )
+    token = data["access_token"]
+    hotel_id = data["memberships"][0]["hotel_id"]
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Hotel-ID": hotel_id
+    }
+    return token, hotel_id, headers
+
 
 @pytest.mark.asyncio
 async def test_health_check():
@@ -22,29 +54,58 @@ async def test_health_check():
         assert data["status"] == "online"
         assert data["service"] == "HotelOS"
 
+
 @pytest.mark.asyncio
 async def test_owner_login():
+    """Verify successful login returns valid JWT token and hotel memberships."""
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/auth/login", json={
             "email": "owner@kashiheritage.com",
             "password": "HotelOS2026!"
         })
-        assert response.status_code == 200
+        assert response.status_code == 200, f"Expected 200 OK, got {response.status_code}: {response.text}"
         data = response.json()
-        assert "access_token" in data
+        assert "access_token" in data, f"Response missing 'access_token': {data}"
+        assert data.get("token_type") == "bearer"
+        assert "user" in data
+        assert data["user"]["email"] == "owner@kashiheritage.com"
         assert len(data["memberships"]) >= 1
         assert data["memberships"][0]["role"] == "OWNER"
+
+
+@pytest.mark.asyncio
+async def test_login_invalid_password_rejected():
+    """Verify that login with incorrect password returns 401 Unauthorized with proper error body."""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/auth/login", json={
+            "email": "owner@kashiheritage.com",
+            "password": "IncorrectPassword2026!"
+        })
+        assert response.status_code == 401, f"Expected 401 Unauthorized, got {response.status_code}: {response.text}"
+        err = response.json()
+        assert "detail" in err
+        assert err["detail"] == "Invalid email or password"
+
+
+@pytest.mark.asyncio
+async def test_login_nonexistent_user_rejected():
+    """Verify that login with nonexistent user returns 401 Unauthorized with proper error body."""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/auth/login", json={
+            "email": "nonexistent@kashiheritage.com",
+            "password": "HotelOS2026!"
+        })
+        assert response.status_code == 401, f"Expected 401 Unauthorized, got {response.status_code}: {response.text}"
+        err = response.json()
+        assert "detail" in err
+        assert err["detail"] == "Invalid email or password"
+
 
 @pytest.mark.asyncio
 async def test_tenant_isolation_enforcement():
     # Attempting to fetch rooms without X-Hotel-ID header must return 400
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
+        token, hotel_id, _ = await get_test_auth_context(client)
 
         # Call rooms WITHOUT X-Hotel-ID
         res_no_header = await client.get(
@@ -65,20 +126,11 @@ async def test_tenant_isolation_enforcement():
         rooms = res_with_header.json()
         assert len(rooms) >= 8
 
+
 @pytest.mark.asyncio
 async def test_night_audit_and_report_generation():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Hotel-ID": hotel_id
-        }
+        _, _, headers = await get_test_auth_context(client)
 
         # Trigger night audit
         audit_res = await client.post("/api/v1/reports/trigger-audit", headers=headers)
@@ -94,20 +146,11 @@ async def test_night_audit_and_report_generation():
         assert pdf_res.headers["content-type"] == "application/pdf"
         assert len(pdf_res.content) > 1000 # Valid generated PDF binary
 
+
 @pytest.mark.asyncio
 async def test_ai_hotel_assistant_occupied_rooms():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Hotel-ID": hotel_id
-        }
+        _, _, headers = await get_test_auth_context(client)
 
         # Ask question about occupancy
         ai_res = await client.post("/api/v1/ai/chat", json={
@@ -118,16 +161,11 @@ async def test_ai_hotel_assistant_occupied_rooms():
         assert "get_occupied_rooms" in ans["tools_executed"]
         assert "occupied" in ans["message"].lower()
 
+
 @pytest.mark.asyncio
 async def test_ai_hotel_assistant_vacant_rooms():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         ai_res = await client.post("/api/v1/ai/chat", json={
             "message": "Which rooms are vacant today?"
@@ -137,16 +175,11 @@ async def test_ai_hotel_assistant_vacant_rooms():
         assert "get_vacant_rooms" in ans["tools_executed"]
         assert "vacant" in ans["message"].lower()
 
+
 @pytest.mark.asyncio
 async def test_ai_hotel_assistant_revenue_summary():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         ai_res = await client.post("/api/v1/ai/chat", json={
             "message": "What was today's revenue and operating contribution?"
@@ -156,16 +189,11 @@ async def test_ai_hotel_assistant_revenue_summary():
         assert "get_revenue_summary" in ans["tools_executed"]
         assert "operating contribution" in ans["message"].lower()
 
+
 @pytest.mark.asyncio
 async def test_ai_hotel_assistant_hindi_query():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         # Query in Hindi
         ai_res = await client.post("/api/v1/ai/chat", json={
@@ -176,16 +204,11 @@ async def test_ai_hotel_assistant_hindi_query():
         assert "get_vacant_rooms" in ans["tools_executed"]
         assert "खाली" in ans["message"]
 
+
 @pytest.mark.asyncio
 async def test_ai_hotel_assistant_action_create_housekeeping():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         # Action command to create housekeeping task for Room 102
         ai_res = await client.post("/api/v1/ai/chat", json={
@@ -196,16 +219,11 @@ async def test_ai_hotel_assistant_action_create_housekeeping():
         assert "create_housekeeping_task" in ans["tools_executed"]
         assert "102" in ans["message"]
 
+
 @pytest.mark.asyncio
 async def test_ai_hotel_assistant_conversation_security():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         # Create a conversation
         ai_res = await client.post("/api/v1/ai/chat", json={
@@ -224,6 +242,7 @@ async def test_ai_hotel_assistant_conversation_security():
         fake_res = await client.get("/api/v1/ai/conversations/nonexistent-id/messages", headers=headers)
         assert fake_res.status_code == 404
 
+
 # =====================================================================
 # AI OPERATIONS AGENT: 10 COMPREHENSIVE END-TO-END SCENARIO TESTS
 # =====================================================================
@@ -232,13 +251,7 @@ async def test_ai_hotel_assistant_conversation_security():
 async def test_scenario_1_vacant_rooms_query():
     """Scenario 1: Vacant rooms query retrieves live database status."""
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         res = await client.post("/api/v1/ai/chat", json={
             "message": "How many rooms are vacant today?"
@@ -248,17 +261,12 @@ async def test_scenario_1_vacant_rooms_query():
         assert "get_vacant_rooms" in data["tools_executed"]
         assert "vacant" in data["message"].lower() or "ready" in data["message"].lower()
 
+
 @pytest.mark.asyncio
 async def test_scenario_2_today_checkins_pii_masked():
     """Scenario 2: Today's check-ins query executes tool and protects guest PII."""
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         res = await client.post("/api/v1/ai/chat", json={
             "message": "What are today's check-ins?"
@@ -269,17 +277,12 @@ async def test_scenario_2_today_checkins_pii_masked():
         # Ensure full 10-digit phone number is never exposed unmasked
         assert "+91 98765 43210" not in data["message"]
 
+
 @pytest.mark.asyncio
 async def test_scenario_3_rooms_needing_cleaning():
     """Scenario 3: Rooms needing cleaning query executes housekeeping tool."""
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         res = await client.post("/api/v1/ai/chat", json={
             "message": "Which rooms need cleaning?"
@@ -288,17 +291,12 @@ async def test_scenario_3_rooms_needing_cleaning():
         data = res.json()
         assert "get_rooms_needing_cleaning" in data["tools_executed"]
 
+
 @pytest.mark.asyncio
 async def test_scenario_4_low_stock_inventory():
     """Scenario 4: Low-stock inventory query executes stock deficit tool."""
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         res = await client.post("/api/v1/ai/chat", json={
             "message": "Which inventory items are running low?"
@@ -307,17 +305,12 @@ async def test_scenario_4_low_stock_inventory():
         data = res.json()
         assert "get_low_stock_items" in data["tools_executed"]
 
+
 @pytest.mark.asyncio
 async def test_scenario_5_yesterday_revenue_usali():
     """Scenario 5: Yesterday's revenue obeys USALI 11th Edition rules."""
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         res = await client.post("/api/v1/ai/chat", json={
             "message": "What was yesterday's room revenue?"
@@ -327,17 +320,12 @@ async def test_scenario_5_yesterday_revenue_usali():
         assert "get_revenue_summary" in data["tools_executed"]
         assert "operating contribution" in data["message"].lower()
 
+
 @pytest.mark.asyncio
 async def test_scenario_6_action_proposal_confirmation_and_duplicate_prevention():
     """Scenario 6: Consequential actions return proposals, require confirmation, and block duplicates."""
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         # Step 1: Request consequential action (Propose creation)
         prop_res = await client.post("/api/v1/ai/chat", json={
@@ -378,6 +366,7 @@ async def test_scenario_6_action_proposal_confirmation_and_duplicate_prevention(
         dup_data = dup_res.json()
         assert "already been executed" in dup_data["message"].lower()
 
+
 @pytest.mark.asyncio
 async def test_scenario_7_unauthorized_role_access():
     """Scenario 7: Unauthorized role is rejected from executing privileged tools."""
@@ -411,6 +400,7 @@ async def test_scenario_7_unauthorized_role_access():
         assert assign_res["success"] is False
         assert "not authorized" in assign_res["message"].lower()
 
+
 @pytest.mark.asyncio
 async def test_scenario_8_unauthenticated_request_rejected():
     """Scenario 8: Unauthenticated request is rejected with 401."""
@@ -420,15 +410,12 @@ async def test_scenario_8_unauthenticated_request_rejected():
         })
         assert res.status_code == 401
 
+
 @pytest.mark.asyncio
 async def test_scenario_9_cross_hotel_isolation():
     """Scenario 9: Cross-hotel isolation prevents accessing other hotels' data."""
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
+        token, _, _ = await get_test_auth_context(client)
 
         # Call with nonexistent or alien hotel ID
         res = await client.post(
@@ -439,8 +426,9 @@ async def test_scenario_9_cross_hotel_isolation():
                 "X-Hotel-ID": "00000000-0000-0000-0000-000000000000"
             }
         )
-        # Should be 403 because user has no membership in this foreign hotel
+        # Should be 403 or 400 because user has no membership in this foreign hotel
         assert res.status_code in [400, 403]
+
 
 @pytest.mark.asyncio
 async def test_scenario_10_missing_api_key_handling():
@@ -448,13 +436,7 @@ async def test_scenario_10_missing_api_key_handling():
     from app.core.config import settings
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         # Save original settings
         orig_provider = settings.AI_PROVIDER
@@ -481,13 +463,7 @@ async def test_scenario_10_missing_api_key_handling():
 async def test_general_knowledge_loop_query():
     """Scenario 11: General knowledge query (What is a loop?) answered directly without operational tools."""
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         res = await client.post("/api/v1/ai/chat", json={
             "message": "What is a loop?"
@@ -504,13 +480,7 @@ async def test_general_knowledge_loop_query():
 async def test_general_knowledge_functions_query():
     """Scenario 12: General knowledge query (Explain Python functions) returns code examples without querying DB."""
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         res = await client.post("/api/v1/ai/chat", json={
             "message": "Explain Python functions."
@@ -526,13 +496,7 @@ async def test_general_knowledge_functions_query():
 async def test_general_knowledge_hotel_analogy():
     """Scenario 13: Technical concept explained using hotel analogy without running DB tools."""
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        login_res = await client.post("/api/v1/auth/login", json={
-            "email": "owner@kashiheritage.com",
-            "password": "HotelOS2026!"
-        })
-        token = login_res.json()["access_token"]
-        hotel_id = login_res.json()["memberships"][0]["hotel_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
+        _, _, headers = await get_test_auth_context(client)
 
         res = await client.post("/api/v1/ai/chat", json={
             "message": "Explain loops using a hotel example."
@@ -559,5 +523,3 @@ def test_classify_intent():
     assert classify_intent("What are today's check-ins?") == "HOTEL_DATA"
     assert classify_intent("status") == "AMBIGUOUS"
     assert classify_intent("hi") == "GENERAL_KNOWLEDGE"
-
-

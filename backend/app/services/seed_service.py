@@ -11,9 +11,13 @@ from app.models.models import (
     LaundryItem, Guest, GuestStay, ExpenseCategory, Expense, Revenue, Payment
 )
 
-async def seed_initial_data(db: AsyncSession):
-    # Strictly forbid demo seeding in production environments
-    if settings.ENVIRONMENT.lower() == "production" or not settings.ENABLE_DEMO_SEEDING:
+async def seed_initial_data(db: AsyncSession, force: bool = False):
+    # Strictly forbid demo seeding in production environments unless explicitly forced
+    if settings.ENVIRONMENT.lower() == "production" and not force:
+        return
+
+    # In non-production, check ENABLE_DEMO_SEEDING unless forced or running in test environment
+    if not settings.ENABLE_DEMO_SEEDING and not force and settings.ENVIRONMENT.lower() != "test":
         return
 
     # Check if already seeded

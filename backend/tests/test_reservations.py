@@ -36,7 +36,7 @@ async def setup_test_db():
     login_rate_limiter.reset()
     account_login_rate_limiter.reset()
     async with AsyncSessionLocal() as session:
-        await seed_initial_data(session)
+        await seed_initial_data(session, force=True)
         # Clean up any test stays created with BK- booking references
         stmt = select(GuestStay.id).where(GuestStay.booking_reference.like("BK-%"))
         stay_ids = (await session.execute(stmt)).scalars().all()
@@ -499,12 +499,28 @@ async def test_multi_tenant_isolation_reservations():
         }, headers=headers_a)
         stay_a_id = create_res.json()["id"]
 
-        # Fetch Hotel B from DB
+        # Fetch or create Hotel B for multi-tenant verification
         async with AsyncSessionLocal() as session:
             hotels = (await session.execute(select(Hotel).where(Hotel.id != hotel_id_a))).scalars().all()
             if not hotels:
-                pytest.skip("Second hotel not available for multi-tenant check")
-            hotel_b = hotels[0]
+                hotel_b = Hotel(
+                    name="Second Test Hotel",
+                    slug="second-test-hotel-res",
+                    address="Test Road",
+                    city="Varanasi",
+                    state="Uttar Pradesh",
+                    country="India",
+                    postal_code="221001",
+                    phone="+91 542 8888888",
+                    email="second@test.com",
+                    timezone="Asia/Kolkata",
+                    currency="INR"
+                )
+                session.add(hotel_b)
+                await session.commit()
+                await session.refresh(hotel_b)
+            else:
+                hotel_b = hotels[0]
 
             # Assign membership to user for Hotel B if not exists
             user = (await session.execute(select(User).where(User.email == "owner@kashiheritage.com"))).scalar_one()

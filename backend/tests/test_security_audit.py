@@ -33,8 +33,12 @@ from sqlalchemy import select, func, delete
 
 @pytest_asyncio.fixture(scope="function", autouse=True)
 async def setup_test_db():
+    login_rate_limiter.reset()
+    account_login_rate_limiter.reset()
+    digital_checkin_rate_limiter.reset()
+    ai_chat_rate_limiter.reset()
     async with AsyncSessionLocal() as session:
-        await seed_initial_data(session)
+        await seed_initial_data(session, force=True)
 
 # =====================================================================
 # 1. P0 — NIGHT AUDIT FINANCIAL INTEGRITY TESTS
@@ -45,7 +49,7 @@ async def test_night_audit_concurrency_lock_and_idempotency():
     """Verify that concurrent runs of run_night_audit post exactly 1 set of charges and 0 duplicates."""
     test_audit_date = date(2026, 12, 10)
     async with AsyncSessionLocal() as session:
-        res = await session.execute(select(Hotel).where(Hotel.is_active == True))
+        res = await session.execute(select(Hotel).where(Hotel.slug == "kashi-heritage-haveli"))
         hotel = res.scalars().first()
         hotel_id = hotel.id
 
@@ -79,45 +83,56 @@ async def test_night_audit_concurrency_lock_and_idempotency():
 async def test_night_audit_two_different_hotels_independent():
     """Verify that two different hotels can execute night audits independently without interference."""
     audit_date = date(2026, 12, 12)
-    async with AsyncSessionLocal() as session:
-        # Create a second distinct hotel
-        hotel_b = Hotel(
-            name="Ganga View Heritage",
-            slug="ganga-view-heritage-test",
-            address="Dashashwamedh Ghat",
-            city="Varanasi",
-            state="Uttar Pradesh",
-            country="India",
-            postal_code="221001",
-            phone="+91 542 9999999",
-            email="manager@gangaview.com",
-            timezone="Asia/Kolkata",
-            currency="INR"
-        )
-        session.add(hotel_b)
-        await session.commit()
-        await session.refresh(hotel_b)
-        hotel_b_id = hotel_b.id
+    hotel_b_id = None
+    try:
+        async with AsyncSessionLocal() as session:
+            # Check or create second distinct hotel
+            res_b = await session.execute(select(Hotel).where(Hotel.slug == "ganga-view-heritage-test"))
+            hotel_b = res_b.scalar_one_or_none()
+            if not hotel_b:
+                hotel_b = Hotel(
+                    name="Ganga View Heritage",
+                    slug="ganga-view-heritage-test",
+                    address="Dashashwamedh Ghat",
+                    city="Varanasi",
+                    state="Uttar Pradesh",
+                    country="India",
+                    postal_code="221001",
+                    phone="+91 542 9999999",
+                    email="manager@gangaview.com",
+                    timezone="Asia/Kolkata",
+                    currency="INR"
+                )
+                session.add(hotel_b)
+                await session.commit()
+                await session.refresh(hotel_b)
+            hotel_b_id = hotel_b.id
 
-        hotel_a = (await session.execute(select(Hotel).where(Hotel.slug == "kashi-heritage-haveli"))).scalars().first()
-        hotel_a_id = hotel_a.id
+            hotel_a = (await session.execute(select(Hotel).where(Hotel.slug == "kashi-heritage-haveli"))).scalars().first()
+            hotel_a_id = hotel_a.id
 
-    # Execute audits for both hotels simultaneously
-    async with AsyncSessionLocal() as s_a, AsyncSessionLocal() as s_b:
-        task_a = NightAuditService.run_night_audit(s_a, hotel_a_id, audit_date)
-        task_b = NightAuditService.run_night_audit(s_b, hotel_b_id, audit_date)
-        res_a, res_b = await asyncio.gather(task_a, task_b)
+        # Execute audits for both hotels simultaneously
+        async with AsyncSessionLocal() as s_a, AsyncSessionLocal() as s_b:
+            task_a = NightAuditService.run_night_audit(s_a, hotel_a_id, audit_date)
+            task_b = NightAuditService.run_night_audit(s_b, hotel_b_id, audit_date)
+            res_a, res_b = await asyncio.gather(task_a, task_b)
 
-    assert res_a["hotel_id"] == hotel_a_id
-    assert res_b["hotel_id"] == hotel_b_id
-    assert "financials" in res_a and "financials" in res_b
+        assert res_a["hotel_id"] == hotel_a_id
+        assert res_b["hotel_id"] == hotel_b_id
+        assert "financials" in res_a and "financials" in res_b
+    finally:
+        if hotel_b_id:
+            async with AsyncSessionLocal() as clean_session:
+                await clean_session.execute(delete(GeneratedReport).where(GeneratedReport.hotel_id == hotel_b_id))
+                await clean_session.execute(delete(Hotel).where(Hotel.id == hotel_b_id))
+                await clean_session.commit()
 
 @pytest.mark.asyncio
 async def test_night_audit_retry_and_recovery():
     """Verify that retrying a failed or rerun night audit is completely idempotent."""
     audit_date = date(2026, 12, 15)
     async with AsyncSessionLocal() as session:
-        hotel = (await session.execute(select(Hotel))).scalars().first()
+        hotel = (await session.execute(select(Hotel).where(Hotel.slug == "kashi-heritage-haveli"))).scalars().first()
         hotel_id = hotel.id
 
     async with AsyncSessionLocal() as s1:
@@ -140,7 +155,7 @@ async def test_night_audit_retry_and_recovery():
 async def test_digital_checkin_expired_post_and_get_rejected():
     """Verify that expired digital check-in links are strictly rejected on both GET and POST."""
     async with AsyncSessionLocal() as session:
-        hotel = (await session.execute(select(Hotel))).scalars().first()
+        hotel = (await session.execute(select(Hotel).where(Hotel.slug == "kashi-heritage-haveli"))).scalars().first()
         room = (await session.execute(select(Room).where(Room.hotel_id == hotel.id))).scalars().first()
         guest = Guest(hotel_id=hotel.id, full_name="Expired Guest", phone="+91 99999 00000")
         session.add(guest)
@@ -178,7 +193,7 @@ async def test_digital_checkin_expired_post_and_get_rejected():
 async def test_digital_checkin_concurrent_submissions_exactly_one_succeeds():
     """Verify that concurrent submissions for the same token race safely: exactly 1 succeeds, losing request rejected."""
     async with AsyncSessionLocal() as session:
-        hotel = (await session.execute(select(Hotel))).scalars().first()
+        hotel = (await session.execute(select(Hotel).where(Hotel.slug == "kashi-heritage-haveli"))).scalars().first()
         room = (await session.execute(select(Room).where(Room.hotel_id == hotel.id))).scalars().first()
         guest = Guest(hotel_id=hotel.id, full_name="Original Name", phone="+91 91234 56789")
         session.add(guest)
@@ -284,6 +299,7 @@ async def test_tenant_ai_quota_enforcement():
             "email": "owner@kashiheritage.com",
             "password": "HotelOS2026!"
         })
+        assert login_res.status_code == 200, f"Login failed: {login_res.status_code} - {login_res.text}"
         token = login_res.json()["access_token"]
         hotel_id = login_res.json()["memberships"][0]["hotel_id"]
         headers = {"Authorization": f"Bearer {token}", "X-Hotel-ID": hotel_id}
