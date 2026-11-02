@@ -1,12 +1,13 @@
 from fastapi import APIRouter
 from app.api.v1.endpoints import (
-    auth, hotels, rooms, inventory, operations, guests, finance, reports, ai, utilities
+    auth, hotels, rooms, inventory, operations, guests, finance, reports, ai, utilities, reservations
 )
 
 api_router = APIRouter()
 
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(hotels.router, prefix="/hotels", tags=["Hotels & Multi-Tenancy"])
+api_router.include_router(reservations.router, prefix="/reservations", tags=["Reservations & Booking"])
 api_router.include_router(rooms.router, prefix="/rooms", tags=["Rooms & Floors"])
 api_router.include_router(inventory.router, prefix="/inventory", tags=["Inventory & Assets"])
 api_router.include_router(operations.router, prefix="/operations", tags=["Operations"])

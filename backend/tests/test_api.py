@@ -4,9 +4,12 @@ import httpx
 from app.main import app
 from app.core.database import AsyncSessionLocal
 from app.services.seed_service import seed_initial_data
+from app.core.rate_limit import login_rate_limiter, account_login_rate_limiter
 
 @pytest_asyncio.fixture(scope="function", autouse=True)
 async def setup_test_db():
+    login_rate_limiter.reset()
+    account_login_rate_limiter.reset()
     async with AsyncSessionLocal() as session:
         await seed_initial_data(session)
 

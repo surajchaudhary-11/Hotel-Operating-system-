@@ -419,9 +419,166 @@ class GuestStayResponse(BaseModel):
     total_paid: Decimal
     balance_due: Decimal
     registration_token: str
+    booking_reference: Optional[str] = None
+    booking_source: Optional[str] = "DIRECT"
+    external_reference_id: Optional[str] = None
+    group_booking_id: Optional[str] = None
+    special_requests: Optional[str] = None
+    estimated_arrival_time: Optional[str] = None
+    payment_status: Optional[str] = "UNPAID"
+    cancellation_reason: Optional[str] = None
     
     class Config:
         from_attributes = True
+
+# -------------------------------------------------------------
+# PHASE 2: RESERVATION & TAPE CHART SCHEMAS
+# -------------------------------------------------------------
+
+class ReservationCreate(BaseModel):
+    guest_id: Optional[str] = None
+    guest_info: Optional[GuestRegistrationRequest] = None
+    room_id: str
+    check_in_time: datetime
+    expected_check_out_time: datetime
+    adult_count: int = 1
+    child_count: int = 0
+    room_rate_per_night: Decimal
+    booking_source: str = "DIRECT" # DIRECT, WALK_IN, PHONE, WEBSITE, BOOKING_COM, MAKEMYTRIP, GOIBIBO, AGODA, CORPORATE, TRAVEL_AGENT
+    external_reference_id: Optional[str] = None
+    special_requests: Optional[str] = None
+    estimated_arrival_time: Optional[str] = "14:00"
+    advance_payment_amount: Decimal = Decimal("0.00")
+    advance_payment_mode: Optional[str] = "UPI_QR"
+
+class GroupReservationItem(BaseModel):
+    room_id: str
+    room_rate_per_night: Decimal
+    adult_count: int = 1
+    child_count: int = 0
+    guest_info: Optional[GuestRegistrationRequest] = None
+
+class GroupReservationCreate(BaseModel):
+    primary_guest_id: Optional[str] = None
+    primary_guest_info: Optional[GuestRegistrationRequest] = None
+    check_in_time: datetime
+    expected_check_out_time: datetime
+    booking_source: str = "DIRECT"
+    external_reference_id: Optional[str] = None
+    special_requests: Optional[str] = None
+    estimated_arrival_time: Optional[str] = "14:00"
+    rooms: List[GroupReservationItem]
+    advance_payment_amount: Decimal = Decimal("0.00")
+    advance_payment_mode: Optional[str] = "UPI_QR"
+
+class ReservationUpdate(BaseModel):
+    check_in_time: Optional[datetime] = None
+    expected_check_out_time: Optional[datetime] = None
+    room_rate_per_night: Optional[Decimal] = None
+    adult_count: Optional[int] = None
+    child_count: Optional[int] = None
+    booking_source: Optional[str] = None
+    external_reference_id: Optional[str] = None
+    special_requests: Optional[str] = None
+    estimated_arrival_time: Optional[str] = None
+
+class ReservationCancelRequest(BaseModel):
+    cancellation_reason: str
+    refund_amount: Decimal = Decimal("0.00")
+    refund_reason: Optional[str] = None
+
+class RoomReassignRequest(BaseModel):
+    new_room_id: str
+    reason: Optional[str] = None
+
+class ReservationPaymentCreate(BaseModel):
+    amount: Decimal
+    payment_mode: str = "UPI_QR" # CASH, UPI_QR, CREDIT_DEBIT_CARD, BANK_TRANSFER
+    transaction_reference: Optional[str] = None
+    notes: Optional[str] = None
+
+class ReservationResponse(BaseModel):
+    id: str
+    hotel_id: str
+    booking_reference: str
+    booking_source: str
+    external_reference_id: Optional[str] = None
+    group_booking_id: Optional[str] = None
+    guest_id: str
+    guest_name: str
+    guest_phone: str
+    guest_email: Optional[str] = None
+    room_id: str
+    room_number: str
+    room_type_name: Optional[str] = None
+    floor_name: Optional[str] = None
+    check_in_time: datetime
+    expected_check_out_time: datetime
+    actual_check_out_time: Optional[datetime] = None
+    status: str
+    adult_count: int
+    child_count: int
+    room_rate_per_night: Decimal
+    total_room_charge: Decimal
+    total_tax_charge: Decimal
+    total_additional_charge: Decimal
+    total_paid: Decimal
+    balance_due: Decimal
+    payment_status: str
+    special_requests: Optional[str] = None
+    estimated_arrival_time: Optional[str] = None
+    cancellation_reason: Optional[str] = None
+    registration_token: str
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class TapeChartBlock(BaseModel):
+    reservation_id: str
+    booking_reference: str
+    guest_name: str
+    guest_phone: str
+    room_id: str
+    room_number: str
+    check_in_date: date
+    check_out_date: date
+    status: str
+    booking_source: str
+    payment_status: str
+    total_paid: Decimal
+    balance_due: Decimal
+
+class TapeChartRoom(BaseModel):
+    room_id: str
+    room_number: str
+    room_type: str
+    floor_name: str
+    current_status: str
+    base_price: Decimal
+    blocks: List[TapeChartBlock]
+
+class TapeChartResponse(BaseModel):
+    start_date: date
+    end_date: date
+    rooms: List[TapeChartRoom]
+
+class RoomAvailabilityItem(BaseModel):
+    room_id: str
+    room_number: str
+    floor_name: str
+    room_type_id: str
+    room_type_name: str
+    base_price: Decimal
+    max_occupancy: int
+    is_available: bool
+
+class RoomAvailabilityResponse(BaseModel):
+    check_in_date: date
+    check_out_date: date
+    total_rooms: int
+    available_rooms_count: int
+    available_rooms: List[RoomAvailabilityItem]
 
 # -------------------------------------------------------------
 # FINANCIAL MANAGEMENT & ROOM PROFITABILITY

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import {
-  LayoutDashboard, BedDouble, Boxes, Sparkles, Wrench,
+  LayoutDashboard, CalendarDays, BedDouble, Boxes, Sparkles, Wrench,
   Shirt, Users, TrendingUp, Zap, FileText, Bot, Settings,
   LogOut, ChevronDown, ChevronLeft, ChevronRight, Building2
 } from "lucide-react";
@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { name: "Overview", href: "/overview", icon: LayoutDashboard },
+  { name: "Reservations", href: "/reservations", icon: CalendarDays },
   { name: "Rooms & Floors", href: "/rooms", icon: BedDouble },
   { name: "Inventory & Assets", href: "/inventory", icon: Boxes },
   { name: "Housekeeping", href: "/housekeeping", icon: Sparkles },

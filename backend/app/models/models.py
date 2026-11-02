@@ -473,6 +473,18 @@ class GuestStay(TimeStampedBase):
     balance_due = Column(Numeric(12, 2), default=0.00, nullable=False)
     registration_token = Column(String(36), default=generate_uuid, unique=True, index=True, nullable=False)
     
+    # Phase 2: Reservation Management Fields
+    booking_reference = Column(String(30), unique=True, index=True, nullable=True)
+    booking_source = Column(String(30), default="DIRECT", nullable=False)
+    # DIRECT, WALK_IN, PHONE, WEBSITE, BOOKING_COM, MAKEMYTRIP, GOIBIBO, AGODA, CORPORATE, TRAVEL_AGENT
+    external_reference_id = Column(String(100), nullable=True)
+    group_booking_id = Column(String(36), index=True, nullable=True)
+    special_requests = Column(Text, nullable=True)
+    estimated_arrival_time = Column(String(10), nullable=True)
+    payment_status = Column(String(20), default="UNPAID", nullable=False)
+    # UNPAID, PARTIALLY_PAID, PAID, REFUNDED
+    cancellation_reason = Column(Text, nullable=True)
+    
     guest = relationship("Guest", back_populates="stays")
     room = relationship("Room", back_populates="stays")
     revenues = relationship("Revenue", back_populates="stay")
