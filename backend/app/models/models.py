@@ -557,6 +557,7 @@ class Revenue(Base):
     amount = Column(Numeric(12, 2), nullable=False)
     tax_amount = Column(Numeric(12, 2), default=0.00, nullable=False)
     posting_date = Column(Date, default=date.today, nullable=False, index=True)
+    idempotency_key = Column(String(100), unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     
     stay = relationship("GuestStay", back_populates="revenues")
@@ -752,4 +753,47 @@ class AssistantToolLog(Base):
     result_summary = Column(Text, nullable=True)
     execution_duration_ms = Column(Integer, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+# -------------------------------------------------------------
+# 11. TENANT AI USAGE QUOTAS & METERING
+# -------------------------------------------------------------
+
+class TenantAIQuota(Base):
+    __tablename__ = "tenant_ai_quotas"
+
+    hotel_id = Column(String(36), ForeignKey("hotels.id", ondelete="CASCADE"), primary_key=True)
+    daily_request_limit = Column(Integer, default=500, nullable=False)
+    monthly_request_limit = Column(Integer, default=5000, nullable=False)
+    monthly_budget_usd = Column(Numeric(10, 2), default=20.00, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    hotel = relationship("Hotel")
+
+
+class TenantAIUsage(Base):
+    __tablename__ = "tenant_ai_usage"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    hotel_id = Column(String(36), ForeignKey("hotels.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String(50), nullable=False) # gemini, openai
+    model = Column(String(100), nullable=False)
+    prompt_tokens = Column(Integer, default=0, nullable=False)
+    completion_tokens = Column(Integer, default=0, nullable=False)
+    total_tokens = Column(Integer, default=0, nullable=False)
+    estimated_cost = Column(Numeric(10, 6), default=0.000000, nullable=False)
+    request_status = Column(String(20), default="SUCCESS", nullable=False) # SUCCESS, FAILED, RATE_LIMITED, QUOTA_EXCEEDED
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    period_date = Column(Date, nullable=False, index=True)
+    period_month = Column(String(7), nullable=False, index=True) # YYYY-MM
+
+    hotel = relationship("Hotel")
+
+    __table_args__ = (
+        Index("ix_tenant_ai_usage_hotel_period", "hotel_id", "period_month"),
+        Index("ix_tenant_ai_usage_hotel_date", "hotel_id", "period_date"),
+    )
+
 

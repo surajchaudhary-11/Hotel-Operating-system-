@@ -9,6 +9,7 @@ import asyncio
 from collections import defaultdict
 from typing import Callable, Optional
 from fastapi import Request, HTTPException, status
+from app.core.config import settings
 
 class SlidingWindowRateLimiter:
     def __init__(self, max_requests: int, window_seconds: int, scope: str = "default"):
@@ -33,6 +34,7 @@ class SlidingWindowRateLimiter:
 
     async def is_allowed(self, key: str) -> tuple[bool, int, int]:
         """
+        Records attempt and checks if allowed within sliding window.
         Returns:
             (allowed: bool, current_count: int, retry_after: int)
         """
@@ -59,6 +61,34 @@ class SlidingWindowRateLimiter:
             self._history[key].append(now)
             return True, len(self._history[key]), 0
 
+    async def check_only(self, key: str) -> tuple[bool, int, int]:
+        """Checks if key is currently rate-limited without recording a new hit."""
+        now = time.time()
+        window_start = now - self.window_seconds
+
+        async with self._get_lock():
+            timestamps = self._history[key]
+            valid_timestamps = [t for t in timestamps if t > window_start]
+            self._history[key] = valid_timestamps
+
+            if len(valid_timestamps) >= self.max_requests:
+                earliest_valid = valid_timestamps[0]
+                retry_after = max(1, int(earliest_valid + self.window_seconds - now))
+                return False, len(valid_timestamps), retry_after
+            return True, len(valid_timestamps), 0
+
+    async def record_hit(self, key: str) -> None:
+        """Records a timestamp for this key (e.g., on a failed authentication attempt)."""
+        now = time.time()
+        async with self._get_lock():
+            self._history[key].append(now)
+
+    async def reset_key(self, key: str) -> None:
+        """Clears recorded hits for a specific key (e.g., after successful authentication)."""
+        async with self._get_lock():
+            if key in self._history:
+                del self._history[key]
+
     def _cleanup(self, now: float):
         cutoff = now - self.window_seconds
         keys_to_remove = []
@@ -77,8 +107,10 @@ class SlidingWindowRateLimiter:
 
 
 # Pre-configured rate limiters
-# Login & Register: 10 attempts per minute per IP
-login_rate_limiter = SlidingWindowRateLimiter(max_requests=10, window_seconds=60, scope="auth_login")
+# Login & Register IP Throttling: 10 attempts per minute per IP
+login_rate_limiter = SlidingWindowRateLimiter(max_requests=10, window_seconds=60, scope="auth_login_ip")
+# Account-Level Brute Force Protection: 5 failed attempts per 15 minutes per normalized email
+account_login_rate_limiter = SlidingWindowRateLimiter(max_requests=5, window_seconds=900, scope="auth_login_account")
 # Digital Check-in details: 20 requests per minute per IP
 digital_checkin_rate_limiter = SlidingWindowRateLimiter(max_requests=20, window_seconds=60, scope="digital_checkin")
 # AI Assistant: 30 requests per minute per tenant/user
@@ -86,11 +118,29 @@ ai_chat_rate_limiter = SlidingWindowRateLimiter(max_requests=30, window_seconds=
 
 
 def get_client_ip(request: Request) -> str:
-    """Extract client IP handling reverse proxies."""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    """
+    Extracts real client IP address with strict reverse-proxy trust validation.
+    Never trusts X-Forwarded-For unless the direct connecting peer IP is in TRUSTED_PROXIES.
+    """
+    if not request.client:
+        return "unknown"
+
+    peer_ip = request.client.host
+
+    is_trusted = (
+        settings.TRUST_ALL_PROXIES or
+        peer_ip in settings.TRUSTED_PROXIES or
+        any(peer_ip == tp or peer_ip.startswith(tp) for tp in settings.TRUSTED_PROXIES)
+    )
+
+    if is_trusted:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            ips = [ip.strip() for ip in forwarded.split(",") if ip.strip()]
+            if ips:
+                return ips[0]
+
+    return peer_ip
 
 
 def rate_limit_dependency(limiter: SlidingWindowRateLimiter, key_func: Callable[[Request], str] = get_client_ip):

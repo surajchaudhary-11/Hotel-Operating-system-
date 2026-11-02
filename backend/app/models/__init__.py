@@ -11,7 +11,8 @@ from app.models.models import (
     ExpenseCategory, Expense, Revenue, Payment, Refund, Budget, RoomMonthlyContribution,
     UtilityMeter, UtilityReading,
     ReportSchedule, GeneratedReport, NotificationDeliveryLog,
-    AssistantConversation, AssistantMessage, AssistantToolLog
+    AssistantConversation, AssistantMessage, AssistantToolLog,
+    TenantAIQuota, TenantAIUsage
 )
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "ExpenseCategory", "Expense", "Revenue", "Payment", "Refund", "Budget", "RoomMonthlyContribution",
     "UtilityMeter", "UtilityReading",
     "ReportSchedule", "GeneratedReport", "NotificationDeliveryLog",
-    "AssistantConversation", "AssistantMessage", "AssistantToolLog"
+    "AssistantConversation", "AssistantMessage", "AssistantToolLog",
+    "TenantAIQuota", "TenantAIUsage"
 ]
 

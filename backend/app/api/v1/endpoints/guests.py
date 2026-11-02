@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 from app.core.database import get_db
 from app.core.dependencies import get_tenant_context, require_roles, TenantContext
 from app.core.rate_limit import digital_checkin_rate_limiter, rate_limit_dependency
@@ -279,6 +279,37 @@ async def submit_digital_checkin(token: str, data: GuestRegistrationRequest, db:
             detail=f"Registration closed for this stay (Status: {stay.status})."
         )
 
+    # Expiry verification (enforced symmetrically with GET endpoint)
+    now_utc = datetime.now(timezone.utc)
+    if stay.expected_check_out_time:
+        exp_time = stay.expected_check_out_time
+        if exp_time.tzinfo is None:
+            exp_time = exp_time.replace(tzinfo=timezone.utc)
+        if now_utc > exp_time + timedelta(days=1):
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail="This check-in link has expired."
+            )
+
+    # Atomic single-use token consumption via conditional database update
+    # Guaranteed to fail if another concurrent request consumed or rotated the token
+    new_token = f"used_{uuid.uuid4().hex[:16]}"
+    stmt_consume = (
+        update(GuestStay)
+        .where(
+            GuestStay.id == stay.id,
+            GuestStay.registration_token == token,
+            GuestStay.status.in_(["RESERVED", "CHECKED_IN"])
+        )
+        .values(registration_token=new_token)
+    )
+    res_consume = await db.execute(stmt_consume)
+    if res_consume.rowcount == 0:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="This check-in link has already been used or expired."
+        )
+
     masked_id = data.id_number_masked
     if masked_id:
         # Aadhaar DPDP compliance: mask all but last 4 digits
@@ -295,9 +326,6 @@ async def submit_digital_checkin(token: str, data: GuestRegistrationRequest, db:
     guest.id_number_masked = masked_id
     guest.city = data.city
     guest.state = data.state
-
-    # Invalidate token to prevent replay attack / tampering after submission
-    stay.registration_token = f"used_{uuid.uuid4().hex[:16]}"
 
     await db.commit()
     return {"message": "Digital check-in details submitted successfully. Welcome to HotelOS!"}

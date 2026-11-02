@@ -10,7 +10,7 @@ from app.core.rate_limit import ai_chat_rate_limiter, rate_limit_dependency
 
 router = APIRouter()
 
-@router.post("/chat", response_model=AIChatResponse, dependencies=[Depends(rate_limit_dependency(ai_chat_rate_limiter, key_func=lambda req: req.headers.get("X-Hotel-ID", req.client.host if req.client else "unknown")))])
+@router.post("/chat", response_model=AIChatResponse)
 async def chat_with_assistant(
     data: AIChatRequest,
     ctx: TenantContext = Depends(get_tenant_context),
@@ -18,10 +18,20 @@ async def chat_with_assistant(
 ):
     """
     Primary conversational endpoint for the AI Operations Assistant.
-    Enforces tenant context, role authorization, and grounded tool calling.
+    Enforces verified tenant context, role authorization, quota metering, and grounded tool calling.
     """
     if not data.message or not data.message.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Message cannot be empty")
+
+    # Enforce rate limit scoped to authenticated hotel and user session
+    rate_key = f"ai_chat:{ctx.hotel_id}:{ctx.user.id}"
+    allowed, count, retry_after = await ai_chat_rate_limiter.is_allowed(rate_key)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"AI chat rate limit exceeded. Maximum 30 requests per minute. Try again in {retry_after}s.",
+            headers={"Retry-After": str(retry_after)}
+        )
 
     result = await AIHotelAssistantService.process_user_query(
         db=db,

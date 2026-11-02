@@ -14,13 +14,16 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
+from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.core.config import settings
 from app.core.dependencies import TenantContext
+from app.core.timezone import get_hotel_today
 from app.models.models import (
-    AssistantConversation, AssistantMessage, AssistantToolLog
+    AssistantConversation, AssistantMessage, AssistantToolLog,
+    TenantAIQuota, TenantAIUsage
 )
 from app.schemas.schemas import ActionProposal
 from app.services.ai_tools import AVAILABLE_AI_TOOLS
@@ -635,7 +638,10 @@ class AIHotelAssistantService:
                 "timestamp": datetime.now(timezone.utc)
             }
 
-        # 6. Execute via Selected Provider
+        # 6. Check and Enforce Persistent Tenant AI Usage Quotas
+        await cls._check_tenant_ai_quota(db=db, ctx=ctx)
+
+        # 7. Execute via Selected Provider
         response_text = ""
         tools_executed: List[str] = []
         action_proposal: Optional[ActionProposal] = None
@@ -717,7 +723,7 @@ class AIHotelAssistantService:
         )
         db.add(asst_msg)
 
-        # 8. Audit Log Tool Execution
+        # 8. Audit Log Tool Execution & Meter Tenant Usage
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
         tool_log = AssistantToolLog(
             hotel_id=hotel_id,
@@ -728,6 +734,28 @@ class AIHotelAssistantService:
             execution_duration_ms=duration_ms
         )
         db.add(tool_log)
+
+        # 9. Persistent Tenant AI Accounting & Metering
+        today_date = get_hotel_today(ctx.hotel.timezone if ctx.hotel else "Asia/Kolkata")
+        prompt_tokens = max(1, len(cleaned_text) // 4)
+        completion_tokens = max(1, len(response_text) // 4)
+        total_tokens = prompt_tokens + completion_tokens
+        # Estimated blended cost: $0.15/1M input, $0.60/1M output
+        cost_usd = Decimal(str(round((prompt_tokens * 0.00000015) + (completion_tokens * 0.00000060), 6)))
+        
+        usage_record = TenantAIUsage(
+            hotel_id=hotel_id,
+            provider=settings.AI_PROVIDER,
+            model=settings.GEMINI_MODEL if settings.AI_PROVIDER != "openai" else settings.OPENAI_MODEL,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            estimated_cost=cost_usd,
+            request_status="SUCCESS",
+            period_date=today_date,
+            period_month=today_date.strftime("%Y-%m")
+        )
+        db.add(usage_record)
         await db.commit()
 
         return {
@@ -738,6 +766,52 @@ class AIHotelAssistantService:
             "action_executed": None,
             "timestamp": datetime.now(timezone.utc)
         }
+
+    @classmethod
+    async def _check_tenant_ai_quota(cls, db: AsyncSession, ctx: TenantContext) -> None:
+        """
+        Enforces database-backed daily and monthly AI request limits and budget ceilings per hotel tenant.
+        Prevents runaway external LLM API consumption.
+        """
+        hotel_tz = ctx.hotel.timezone if ctx.hotel else "Asia/Kolkata"
+        today = get_hotel_today(hotel_tz)
+        period_month = today.strftime("%Y-%m")
+
+        # Query custom quota configuration if present, otherwise default settings
+        res_q = await db.execute(select(TenantAIQuota).where(TenantAIQuota.hotel_id == ctx.hotel_id, TenantAIQuota.is_active == True))
+        quota = res_q.scalar_one_or_none()
+        daily_limit = quota.daily_request_limit if quota else settings.DEFAULT_TENANT_DAILY_AI_LIMIT
+        monthly_limit = quota.monthly_request_limit if quota else settings.DEFAULT_TENANT_MONTHLY_AI_LIMIT
+        budget_usd = float(quota.monthly_budget_usd) if quota else settings.DEFAULT_TENANT_MONTHLY_AI_BUDGET_USD
+
+        # 1. Daily volume check
+        res_day = await db.execute(
+            select(func.count(TenantAIUsage.id))
+            .where(TenantAIUsage.hotel_id == ctx.hotel_id, TenantAIUsage.period_date == today)
+        )
+        day_count = res_day.scalar_one() or 0
+        if day_count >= daily_limit:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Daily AI request limit ({daily_limit}) exceeded for this property. Resets at midnight ({hotel_tz})."
+            )
+
+        # 2. Monthly volume and budget check
+        res_month = await db.execute(
+            select(func.count(TenantAIUsage.id), func.coalesce(func.sum(TenantAIUsage.estimated_cost), 0))
+            .where(TenantAIUsage.hotel_id == ctx.hotel_id, TenantAIUsage.period_month == period_month)
+        )
+        month_count, month_cost = res_month.first()
+        if month_count >= monthly_limit:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Monthly AI request limit ({monthly_limit}) exceeded for billing period {period_month}."
+            )
+        if float(month_cost) >= budget_usd:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Monthly AI expenditure ceiling (${budget_usd:.2f}) reached for this property."
+            )
 
     @staticmethod
     def _create_error_response(conv_id: str, err_msg: str, db: AsyncSession) -> Dict[str, Any]:

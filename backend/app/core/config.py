@@ -45,6 +45,17 @@ class Settings(BaseSettings):
     DEFAULT_TIMEZONE: str = "Asia/Kolkata"
     DEFAULT_CURRENCY: str = "INR"
 
+    # Proxy Trust Configuration
+    TRUSTED_PROXIES: List[str] = [
+        ip.strip() for ip in os.getenv("TRUSTED_PROXIES", "127.0.0.1,::1,localhost,testclient").split(",") if ip.strip()
+    ]
+    TRUST_ALL_PROXIES: bool = os.getenv("TRUST_ALL_PROXIES", "false").lower() in ("true", "1", "yes")
+
+    # AI Quota Defaults
+    DEFAULT_TENANT_DAILY_AI_LIMIT: int = int(os.getenv("DEFAULT_TENANT_DAILY_AI_LIMIT", "500"))
+    DEFAULT_TENANT_MONTHLY_AI_LIMIT: int = int(os.getenv("DEFAULT_TENANT_MONTHLY_AI_LIMIT", "5000"))
+    DEFAULT_TENANT_MONTHLY_AI_BUDGET_USD: float = float(os.getenv("DEFAULT_TENANT_MONTHLY_AI_BUDGET_USD", "20.00"))
+
     class Config:
         case_sensitive = True
         env_file = ".env"

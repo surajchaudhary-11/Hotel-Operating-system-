@@ -1,14 +1,18 @@
 import asyncio
+import logging
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text, or_, and_
+from sqlalchemy.exc import IntegrityError
 from app.core.timezone import get_hotel_today
 from app.models.models import (
     Hotel, Room, GuestStay, Revenue, Payment, Expense, 
     MaintenanceTicket, HousekeepingTask, GeneratedReport, Asset
 )
+
+logger = logging.getLogger("hotelos.audit")
 
 class NightAuditService:
     _hotel_locks: Dict[str, asyncio.Lock] = {}
@@ -36,22 +40,29 @@ class NightAuditService:
     ) -> Dict[str, Any]:
         hotel_lock = cls._get_hotel_lock(hotel_id)
         async with hotel_lock:
-            # 0. Acquire row lock where supported to prevent concurrent execution across multi-instance backends
-            hotel_stmt = select(Hotel).where(Hotel.id == hotel_id)
+            # 0. Acquire database-level transaction lock (PostgreSQL advisory xact lock or row-level lock)
             try:
-                # Row lock on PostgreSQL / MySQL
-                if db.bind and "sqlite" not in str(db.bind.url):
-                    hotel_stmt = hotel_stmt.with_for_update()
-            except Exception:
-                pass
-            h_res = await db.execute(hotel_stmt)
+                bind_url = str(db.bind.url) if db.bind else ""
+                if "postgresql" in bind_url:
+                    # Transaction-scoped advisory lock: automatically released when transaction completes
+                    await db.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                        {"lock_key": f"night_audit:{hotel_id}"}
+                    )
+                elif "sqlite" not in bind_url:
+                    hotel_stmt = select(Hotel).where(Hotel.id == hotel_id).with_for_update()
+                    await db.execute(hotel_stmt)
+            except Exception as lock_ex:
+                logger.debug(f"Distributed lock note: {lock_ex}")
+
+            h_res = await db.execute(select(Hotel).where(Hotel.id == hotel_id))
             hotel = h_res.scalar_one_or_none()
             hotel_tz = hotel.timezone if hotel else "Asia/Kolkata"
 
             if not audit_date:
                 audit_date = get_hotel_today(hotel_tz)
 
-            # 1. Post Accrual Room Tariff for all active in-house stays
+            # 1. Post Accrual Room Tariff for all active in-house stays with explicit idempotency key
             stmt_stays = (
                 select(GuestStay)
                 .where(
@@ -64,14 +75,21 @@ class NightAuditService:
 
             posted_revenue_count = 0
             for stay in active_stays:
+                idempotency_key = f"audit:{hotel_id}:{stay.id}:{audit_date}:ROOM_TARIFF"
+
                 # Check if revenue already posted for this stay and posting_date
                 stmt_check = (
                     select(Revenue)
                     .where(
-                        Revenue.hotel_id == hotel_id,
-                        Revenue.stay_id == stay.id,
-                        Revenue.posting_date == audit_date,
-                        Revenue.revenue_type == "ROOM_TARIFF"
+                        or_(
+                            Revenue.idempotency_key == idempotency_key,
+                            and_(
+                                Revenue.hotel_id == hotel_id,
+                                Revenue.stay_id == stay.id,
+                                Revenue.posting_date == audit_date,
+                                Revenue.revenue_type == "ROOM_TARIFF"
+                            )
+                        )
                     )
                 )
                 res_check = await db.execute(stmt_check)
@@ -83,7 +101,8 @@ class NightAuditService:
                         revenue_type="ROOM_TARIFF",
                         amount=stay.room_rate_per_night,
                         tax_amount=round(stay.room_rate_per_night * Decimal("0.12"), 2), # 12% GST
-                        posting_date=audit_date
+                        posting_date=audit_date,
+                        idempotency_key=idempotency_key
                     )
                     db.add(tariff_rev)
                     # Update stay folio balance
@@ -92,7 +111,13 @@ class NightAuditService:
                     stay.balance_due = (stay.total_room_charge + stay.total_tax_charge + stay.total_additional_charge) - stay.total_paid
                     posted_revenue_count += 1
 
-            await db.flush()
+            try:
+                await db.flush()
+            except IntegrityError:
+                # Concurrent worker already inserted the tariff for this idempotency_key
+                logger.info(f"Concurrent night audit detected for hotel {hotel_id} on {audit_date}; rolling back duplicate flush.")
+                await db.rollback()
+                posted_revenue_count = 0
 
             # 2. Aggregations for the daily report
             # Room status counts
@@ -208,5 +233,14 @@ class NightAuditService:
                 )
                 db.add(new_report)
 
-            await db.commit()
+            try:
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                logger.info(f"Concurrent night audit commit detected for hotel {hotel_id} on {audit_date}; rolled back safely.")
+                res_win = await db.execute(stmt_existing)
+                win_report = res_win.scalar_one_or_none()
+                if win_report:
+                    return win_report.report_data
+
             return report_payload

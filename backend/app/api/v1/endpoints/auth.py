@@ -6,7 +6,7 @@ from app.core.security import verify_password, get_password_hash, create_access_
 from app.core.dependencies import get_current_user
 from app.models.models import User, HotelMembership, Hotel
 from app.schemas.schemas import UserRegister, UserLogin, UserResponse, TokenResponse
-from app.core.rate_limit import login_rate_limiter, rate_limit_dependency
+from app.core.rate_limit import login_rate_limiter, account_login_rate_limiter, rate_limit_dependency
 
 router = APIRouter()
 
@@ -40,10 +40,24 @@ async def register_user(data: UserRegister, db: AsyncSession = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse, dependencies=[Depends(rate_limit_dependency(login_rate_limiter))])
 async def login_user(data: UserLogin, db: AsyncSession = Depends(get_db)):
-    res = await db.execute(select(User).where(User.email == data.email))
+    normalized_email = data.email.strip().lower()
+    account_key = f"auth_account:{normalized_email}"
+
+    # Check if account is temporarily throttled due to repeated failed login attempts
+    allowed, count, retry_after = await account_login_rate_limiter.check_only(account_key)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed login attempts for this account. Please try again in {retry_after}s.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
+    res = await db.execute(select(User).where(User.email == normalized_email))
     user = res.scalar_one_or_none()
     
     if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
+        # Record failed attempt against account-level limiter
+        await account_login_rate_limiter.record_hit(account_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
@@ -54,6 +68,9 @@ async def login_user(data: UserLogin, db: AsyncSession = Depends(get_db)):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is deactivated"
         )
+
+    # Successful login: reset failed attempt counter for this account
+    await account_login_rate_limiter.reset_key(account_key)
 
     # Fetch hotel memberships
     stmt = (
